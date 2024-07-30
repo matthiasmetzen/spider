@@ -131,16 +131,16 @@ async fn setup_chrome_interception_base(
     ignore_visuals: bool,
     host_name: &str,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if chrome_intercept {
+    if !chrome_intercept {
+        return None;
+    }
         use chromiumoxide::cdp::browser_protocol::network::ResourceType;
 
-        match auth_challenge_response {
-            Some(ref auth_challenge_response) => {
-                match page
+    if let Some(ref auth_challenge_response) = auth_challenge_response {
+        if let Ok(mut rp) = page
                         .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventAuthRequired>()
                         .await
                         {
-                            Ok(mut rp) => {
                                 let intercept_page = page.clone();
                                 let auth_challenge_response = auth_challenge_response.clone();
 
@@ -167,10 +167,6 @@ async fn setup_chrome_interception_base(
                                     }
                                 });
                             }
-                            _ => (),
-                        }
-            }
-            _ => (),
         }
 
         match page
@@ -422,66 +418,47 @@ impl Website {
     {
         if self.shutdown {
             (shutdown).await;
-            false
-        } else {
-            match handle.as_ref() {
-                Some(handle) => {
+            return false;
+        }
+
+        if let Some(handle) = handle.as_ref() {
                     while handle.load(Ordering::Relaxed) == 1 {
                         interval.tick().await;
                     }
                     if handle.load(Ordering::Relaxed) == 2 {
                         (shutdown).await;
-                        false
-                    } else {
-                        true
+                return false;
                     }
                 }
-                _ => true,
-            }
-        }
+
+        true
     }
 
     /// return `true` if URL:
     ///
     /// - is not already crawled
-    /// - is not over crawl budget
+    /// - is not forbidden by user callback
     /// - is optionally whitelisted
     /// - is not blacklisted
     /// - is not forbidden in robot.txt file (if parameter is defined)
-    #[inline]
-    #[cfg(not(feature = "regex"))]
-    pub fn is_allowed(&mut self, link: &CaseInsensitiveString) -> ProcessLinkStatus {
-        if self.links_visited.contains(link) {
-            ProcessLinkStatus::Blocked
-        } else if self.is_over_budget(link) {
-            ProcessLinkStatus::BudgetExceeded
-        } else {
-            self.is_allowed_default(link.inner())
-        }
-    }
-
-    /// return `true` if URL:
-    ///
-    /// - is not already crawled
     /// - is not over crawl budget
-    /// - is optionally whitelisted
-    /// - is not blacklisted
-    /// - is not forbidden in robot.txt file (if parameter is defined)
     #[inline]
-    #[cfg(feature = "regex")]
     pub fn is_allowed(&mut self, link: &CaseInsensitiveString) -> ProcessLinkStatus {
         if self.links_visited.contains(link) {
-            ProcessLinkStatus::Blocked
-        } else if self.is_over_budget(&link) {
-            ProcessLinkStatus::BudgetExceeded
-        } else if self
-            .is_allowed_default(link)
-            .eq(&ProcessLinkStatus::Allowed)
-        {
-            ProcessLinkStatus::Allowed
-        } else {
-            ProcessLinkStatus::Blocked
+            return ProcessLinkStatus::Blocked;
         }
+        match self.is_allowed_default(link.inner()) {
+            ProcessLinkStatus::Allowed => (), 
+            reason => return reason,
+        }
+        if !self.is_allowed_callback.map_or(true, |cb| cb(link)) {
+            return ProcessLinkStatus::Blocked;
+        }
+        if self.is_over_budget(link) {
+            return ProcessLinkStatus::BudgetExceeded;
+        }
+        
+        ProcessLinkStatus::Allowed
     }
 
     /// return `true` if URL:
@@ -535,131 +512,74 @@ impl Website {
     ///
     /// - is not forbidden in robot.txt file (if parameter is defined)
     pub fn is_allowed_robots(&self, link: &str) -> bool {
-        if self.configuration.respect_robots_txt {
-            match self.robot_file_parser.as_ref() {
-                Some(r) => r.can_fetch(
-                    match self.configuration.user_agent {
-                        Some(ref ua) => ua,
-                        _ => "*",
-                    },
-                    link,
-                ),
-                _ => true,
-            }
-        } else {
-            true
+        if !self.configuration.respect_robots_txt {
+            return true;
         }
+
+        let Some(robots) = self.robot_file_parser.as_ref() else {
+            return true;
+        };
+
+        let user_agent = self.configuration.user_agent.as_ref().map_or("*", |ua| ua.as_str());
+        robots.can_fetch(user_agent,link)
     }
 
     /// Validate if url exceeds crawl budget and should not be handled.
     pub fn is_over_budget(&mut self, link: &CaseInsensitiveString) -> bool {
-        if self.configuration.budget.is_some() || self.configuration.depth_distance > 0 {
-            match Url::parse(link.inner()) {
-                Ok(r) => {
-                    let has_depth_control = self.configuration.depth_distance > 0;
+        if !(self.configuration.budget.is_some() || self.configuration.depth_distance > 0) {
+            return false;
+        }
 
-                    if self.configuration.budget.is_none() {
-                        match r.path_segments() {
-                            Some(segments) => {
-                                let mut over = false;
-                                let mut depth: usize = 0;
+        let Ok(url) = Url::parse(link.inner()) else { return false };
+        let Some(segments) = url.path_segments() else { return false };
+        let segments: Vec<_> = segments.collect();
 
-                                for _ in segments {
-                                    if has_depth_control {
-                                        depth = depth.saturating_add(1);
-                                        if depth >= self.configuration.depth_distance {
-                                            over = true;
-                                            break;
-                                        }
+        // Check request depth
+        if self.configuration.depth_distance > 0 {
+            if segments.len() > self.configuration.depth_distance {
+                return true;
+            }
                                     }
-                                }
 
-                                over
-                            }
-                            _ => false,
-                        }
-                    } else {
-                        match self.configuration.budget.as_mut() {
-                            Some(budget) => {
-                                let exceeded_wild_budget = if self.configuration.wild_card_budgeting
-                                {
-                                    match budget.get_mut(&*WILD_CARD_PATH) {
-                                        Some(budget) => {
-                                            if budget.abs_diff(0) == 1 {
-                                                true
-                                            } else if budget == &0 {
-                                                true
-                                            } else {
-                                                *budget -= 1;
-                                                false
-                                            }
-                                        }
-                                        _ => false,
-                                    }
-                                } else {
-                                    false
-                                };
+        let Some(budget) = self.configuration.budget.as_mut() else { 
+            return false 
+        };
 
-                                // set this up prior to crawl to avoid checks per link.
-                                // If only the wild card budget is set we can safely skip all checks.
-                                let skip_paths =
-                                    self.configuration.wild_card_budgeting && budget.len() == 1;
+        if self.configuration.wild_card_budgeting {
+            let wc_budget = budget.get_mut(&*WILD_CARD_PATH)
+                .expect("Wildcard budgeting was enabled, but no budget for the wildcard was set");
 
+            if wc_budget.abs_diff(0) <= 1 {
+                return true;
+            }
+
+            *wc_budget -= 1;
+
+            // If only the wild card budget is set we can safely skip all checks.
+            if budget.len() == 1 {
+                return false;
+            }
+        };
+        
                                 // check if paths pass
-                                if !skip_paths && !exceeded_wild_budget {
-                                    match r.path_segments() {
-                                        Some(segments) => {
                                             let mut joint_segment =
                                                 CaseInsensitiveString::default();
-                                            let mut over = false;
-                                            let mut depth: usize = 0;
 
                                             for seg in segments {
-                                                if has_depth_control {
-                                                    depth = depth.saturating_add(1);
-                                                    if depth >= self.configuration.depth_distance {
-                                                        over = true;
-                                                        break;
-                                                    }
-                                                }
-
                                                 joint_segment.push_str(seg);
 
-                                                if budget.contains_key(&joint_segment) {
-                                                    match budget.get_mut(&joint_segment) {
-                                                        Some(budget) => {
-                                                            if budget.abs_diff(0) == 0
-                                                                || *budget == 0
-                                                            {
-                                                                over = true;
-                                                                break;
-                                                            } else {
-                                                                *budget -= 1;
-                                                                continue;
-                                                            }
-                                                        }
-                                                        _ => (),
-                                                    };
-                                                }
-                                            }
-
-                                            over
-                                        }
-                                        _ => false,
-                                    }
-                                } else {
-                                    exceeded_wild_budget
-                                }
-                            }
-                            _ => false,
-                        }
-                    }
+            if let Some(budget_entry) = budget.get_mut(&joint_segment) {
+                if *budget_entry == 0 {
+                    return true;
                 }
-                _ => false,
+                
+                *budget_entry -= 1;
             }
-        } else {
-            false
+
+            joint_segment.push('/');
         }
+
+            false
     }
 
     /// Amount of pages crawled.
@@ -759,12 +679,18 @@ impl Website {
 
     /// configure the robots parser on initial crawl attempt and run.
     pub async fn configure_robots_parser(&mut self, client: Client) -> Client {
-        if self.configuration.respect_robots_txt {
+        if !self.configuration.respect_robots_txt {
+            return client;
+        }
+
             let robot_file_parser = self
                 .robot_file_parser
                 .get_or_insert_with(RobotFileParser::new);
 
-            if robot_file_parser.mtime() <= 4000 {
+        if robot_file_parser.mtime() > 4000 {
+            return client;
+        }
+
                 let host_str = match &self.domain_parsed {
                     Some(domain) => domain.as_str(),
                     _ => self.url.inner(),
@@ -777,14 +703,9 @@ impl Website {
                         .await;
                 }
 
-                match robot_file_parser.get_crawl_delay(&self.configuration.user_agent) {
-                    Some(delay) => {
+        if let Some(delay) = robot_file_parser.get_crawl_delay(&self.configuration.user_agent) {
                         // 60 seconds should be the longest to respect for efficiency.
                         self.configuration.delay = delay.as_millis().min(60000) as u64;
-                    }
-                    _ => (),
-                }
-            }
         }
 
         client
@@ -798,25 +719,25 @@ impl Website {
 
         let default_policy = reqwest::redirect::Policy::default();
 
-        match self.domain_parsed.as_deref().cloned() {
-            Some(host_s) => {
+        let Some(host_s) = self.domain_parsed.as_deref().cloned() else {
+            return default_policy;
+        };
+
                 let initial_redirect = Arc::new(AtomicU8::new(0));
-                let initial_redirect_limit = if self.configuration.respect_robots_txt {
-                    2
-                } else {
-                    1
+        let initial_redirect_limit = match self.configuration.respect_robots_txt {
+            true => 2,
+            _ => 1,
                 };
                 let subdomains = self.configuration.subdomains;
                 let tld = self.configuration.tld;
-                let host_domain_name = if tld {
-                    domain_name(&host_s).to_string()
-                } else {
-                    Default::default()
+        let host_domain_name = match tld {
+            true => domain_name(&host_s).to_string(),
+            _ => Default::default(),
                 };
+
                 let redirect_limit = *self.configuration.redirect_limit;
 
-                let custom_policy = {
-                    move |attempt: Attempt| {
+        let custom_policy = move |attempt: Attempt| {
                         if tld && domain_name(attempt.url()) == host_domain_name
                             || subdomains
                                 && attempt
@@ -837,13 +758,10 @@ impl Website {
                             default_policy.redirect(attempt)
                         } else {
                             attempt.stop()
-                        }
                     }
                 };
+
                 reqwest::redirect::Policy::custom(custom_policy)
-            }
-            _ => default_policy,
-        }
     }
 
     /// Setup redirect policy for reqwest.
@@ -1220,19 +1138,17 @@ impl Website {
             let mut l = c_lock.read().await.1.to_owned();
 
             while l.changed().await.is_ok() {
-                let n = &*l.borrow();
-                let (target, rest) = n;
+                let (target, rest) = &*l.borrow();
 
-                if target_id.eq_ignore_ascii_case(&target) {
-                    if rest == &Handler::Resume {
-                        c.store(0, Ordering::Relaxed);
-                    }
-                    if rest == &Handler::Pause {
-                        c.store(1, Ordering::Relaxed);
-                    }
-                    if rest == &Handler::Shutdown {
-                        c.store(2, Ordering::Relaxed);
-                    }
+                if !target_id.eq_ignore_ascii_case(&target) {
+                    continue;
+                }
+
+                match rest {
+                    Handler::Resume => c.store(0, Ordering::Relaxed),
+                    Handler::Pause => c.store(1, Ordering::Relaxed),
+                    Handler::Shutdown => c.store(2, Ordering::Relaxed),
+                    Handler::Start => (),
                 }
             }
         });
@@ -4332,16 +4248,10 @@ impl Website {
 
     /// Guard the channel from closing until all subscription events complete.
     async fn subscription_guard(&self) {
-        match &self.channel {
-            Some(channel) => {
-                if !channel.1.is_empty() {
-                    match &self.channel_guard {
-                        Some(guard_counter) => guard_counter.lock(),
-                        _ => (),
-                    }
-                }
+        if let Some((_tx, rx)) = &self.channel {
+            if !rx.is_empty() {
+                self.channel_guard.as_ref().map(ChannelGuard::lock);
             }
-            _ => (),
         }
     }
 

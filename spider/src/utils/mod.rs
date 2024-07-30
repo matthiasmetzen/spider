@@ -967,38 +967,6 @@ pub async fn perform_screenshot(
     }
 }
 
-#[cfg(all(not(feature = "fs"), feature = "chrome"))]
-/// Perform a network request to a resource extracting all content as text streaming via chrome.
-pub async fn fetch_page_html(
-    target_url: &str,
-    client: &Client,
-    page: &chromiumoxide::Page,
-    wait_for: &Option<crate::configuration::WaitFor>,
-    screenshot: &Option<crate::configuration::ScreenShotConfig>,
-    page_set: bool,
-    openai_config: &Option<crate::configuration::GPTConfigs>,
-) -> PageResponse {
-    match fetch_page_html_chrome_base(
-        &target_url,
-        &page,
-        false,
-        true,
-        wait_for,
-        screenshot,
-        page_set,
-        openai_config,
-        None,
-    )
-    .await
-    {
-        Ok(page) => page,
-        Err(err) => {
-            log::error!("{:?}", err);
-            fetch_page_html_raw(&target_url, &client).await
-        }
-    }
-}
-
 #[cfg(feature = "chrome")]
 /// Check if url matches the last item in a redirect chain for chrome CDP
 pub fn get_last_redirect(
@@ -1267,6 +1235,38 @@ pub async fn fetch_page_html(target_url: &str, client: &Client) -> PageResponse 
         Err(_) => {
             log("- error parsing html text {}", &target_url);
             Default::default()
+        }
+    }
+}
+
+#[cfg(all(not(feature = "fs"), feature = "chrome"))]
+/// Perform a network request to a resource extracting all content as text streaming via chrome.
+pub async fn fetch_page_html(
+    target_url: &str,
+    client: &Client,
+    page: &chromiumoxide::Page,
+    wait_for: &Option<crate::configuration::WaitFor>,
+    screenshot: &Option<crate::configuration::ScreenShotConfig>,
+    page_set: bool,
+    openai_config: &Option<crate::configuration::GPTConfigs>,
+) -> PageResponse {
+    match fetch_page_html_chrome_base(
+        &target_url,
+        &page,
+        false,
+        true,
+        wait_for,
+        screenshot,
+        page_set,
+        openai_config,
+        None,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(err) => {
+            log::error!("{:?}", err);
+            fetch_page_html_raw(&target_url, &client).await
         }
     }
 }
