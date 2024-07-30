@@ -197,7 +197,8 @@ async fn setup_chrome_interception_base(
                                     match chromiumoxide::cdp::browser_protocol::fetch::FulfillRequestParams::builder()
                                     .request_id(event.request_id.clone())
                                     .response_code(200)
-                                    .build() {
+                            .build() 
+                        {
                                         Ok(c) => {
                                             if let Err(e) = intercept_page.execute(c).await
                                             {
@@ -220,9 +221,6 @@ async fn setup_chrome_interception_base(
                 Some(ih)
             }
             _ => None,
-        }
-    } else {
-        None
     }
 }
 
@@ -350,6 +348,12 @@ pub struct Website {
     pub on_link_find_callback: Option<
         fn(CaseInsensitiveString, Option<String>) -> (CaseInsensitiveString, Option<String>),
     >,
+    /// This callback ic called before a request is made
+    pub pre_request_callback: Option<fn(PageRequest) -> PageRequest>,
+    /// This callback is called when testing if a link should be visited
+    pub is_allowed_callback: Option<fn(&CaseInsensitiveString) -> bool>,
+    /// This callback, if provided, replaces the logic for finding links
+    pub find_links_callback: Option<fn(&Page, &PageSelectors, bool) -> HashSet<CaseInsensitiveString>>,
     /// Subscribe and broadcast changes.
     channel: Option<(broadcast::Sender<Page>, Arc<broadcast::Receiver<Page>>)>,
     /// Guard counter for channel handling. This prevents things like the browser from closing after the crawl so that subscriptions can finalize events.
@@ -803,7 +807,7 @@ impl Website {
     }
 
     /// Build the HTTP client.
-    #[cfg(all(not(feature = "decentralized"), not(feature = "cache")))]
+    #[cfg(all(not(feature = "decentralized")))]
     fn configure_http_client_builder(&mut self) -> crate::ClientBuilder {
         use reqwest::header::HeaderMap;
 
@@ -832,94 +836,50 @@ impl Website {
             client
         };
 
-        let client =
+        let mut client =
             crate::utils::header_utils::setup_default_headers(client, &self.configuration, headers);
 
-        let mut client = match &self.configuration.request_timeout {
-            Some(t) => client.timeout(**t),
-            _ => client,
-        };
+        if let Some(t) = &self.configuration.request_timeout {
+            client = client.timeout(**t);
+        }
 
-        let client = match &self.configuration.proxies {
-            Some(proxies) => {
+        if let Some(proxies) = &self.configuration.proxies {
                 for proxie in proxies.iter() {
-                    match reqwest::Proxy::all(proxie) {
-                        Ok(proxy) => client = client.proxy(proxy),
-                        _ => (),
+                if let Ok(proxy) = reqwest::Proxy::all(proxie) {
+                    client = client.proxy(proxy);
                     }
                 }
+        }
+
+        client = self.configure_http_client_cookies(client);
+        client = self.configure_client_cache(client);
+
                 client
             }
-            _ => client,
-        };
 
-        self.configure_http_client_cookies(client)
+    /// Build the HTTP client with caching enabled.
+    #[cfg(all(not(feature = "decentralized"), not(feature = "cache")))]
+    fn configure_client_cache(&mut self, client: crate::ClientBuilder) -> crate::ClientBuilder {
+        client
     }
 
     /// Build the HTTP client with caching enabled.
     #[cfg(all(not(feature = "decentralized"), feature = "cache"))]
-    fn configure_http_client_builder(&mut self) -> crate::ClientBuilder {
+    fn configure_client_cache(&mut self, client: crate::ClientBuilder) -> crate::ClientBuilder {
         use reqwest::header::HeaderMap;
         use reqwest_middleware::ClientBuilder;
 
-        let mut headers = HeaderMap::new();
-
-        let policy = self.setup_redirect_policy();
-        let user_agent = match &self.configuration.user_agent {
-            Some(ua) => ua.as_str(),
-            _ => &get_ua(self.only_chrome_agent()),
-        };
-
-        if cfg!(feature = "real_browser") {
-            headers.extend(crate::utils::header_utils::get_mimic_headers(user_agent));
-        }
-
-        let client = reqwest::Client::builder()
-            .user_agent(user_agent)
-            .danger_accept_invalid_certs(self.configuration.accept_invalid_certs)
-            .redirect(policy)
-            .tcp_keepalive(Duration::from_millis(500))
-            .pool_idle_timeout(None);
-
-        let client = if self.configuration.http2_prior_knowledge {
-            client.http2_prior_knowledge()
-        } else {
-            client
-        };
-
-        let client =
-            crate::utils::header_utils::setup_default_headers(client, &self.configuration, headers);
-
-        let mut client = match &self.configuration.request_timeout {
-            Some(t) => client.timeout(**t),
-            _ => client,
-        };
-
-        let client = match &self.configuration.proxies {
-            Some(proxies) => {
-                for proxie in proxies.iter() {
-                    match reqwest::Proxy::all(proxie) {
-                        Ok(proxy) => client = client.proxy(proxy),
-                        _ => (),
-                    }
-                }
-                client
-            }
-            _ => client,
-        };
-
-        let client = self.configure_http_client_cookies(client);
         let client = ClientBuilder::new(unsafe { client.build().unwrap_unchecked() });
 
         if self.configuration.cache {
+            return client;
+        }
+
             client.with(Cache(HttpCache {
                 mode: CacheMode::Default,
                 manager: CACACHE_MANAGER.clone(),
                 options: HttpCacheOptions::default(),
             }))
-        } else {
-            client
-        }
     }
 
     /// Build the HTTP client with cookie configurations.
@@ -975,7 +935,7 @@ impl Website {
     }
 
     /// Configure http client for decentralization.
-    #[cfg(all(feature = "decentralized", not(feature = "cache")))]
+    #[cfg(all(feature = "decentralized"))]
     pub fn configure_http_client(&mut self) -> Client {
         use reqwest::header::HeaderMap;
         use reqwest::header::HeaderValue;
@@ -1040,100 +1000,18 @@ impl Website {
             }
         }
 
+        if &self.configuration.request_timeout {
+            client = client.timeout(**t);
+        }
         // should unwrap using native-tls-alpn
-        unsafe {
-            match &self.configuration.request_timeout {
-                Some(t) => client.timeout(**t),
-                _ => client,
-            }
+        let mut client = ClientBuilder::new(unsafe {
+            client
             .default_headers(headers)
             .build()
             .unwrap_unchecked()
-        }
-    }
+        });
 
-    /// Configure http client for decentralization.
-    #[cfg(all(feature = "decentralized", feature = "cache"))]
-    pub fn configure_http_client(&mut self) -> Client {
-        use reqwest::header::HeaderMap;
-        use reqwest::header::HeaderValue;
-        use reqwest_middleware::ClientBuilder;
-
-        let mut headers = HeaderMap::new();
-
-        let policy = self.setup_redirect_policy();
-
-        let mut client = reqwest::Client::builder()
-            .user_agent(match &self.configuration.user_agent {
-                Some(ua) => ua.as_str(),
-                _ => &get_ua(self.only_chrome_agent()),
-            })
-            .redirect(policy)
-            .tcp_keepalive(Duration::from_millis(500))
-            .pool_idle_timeout(None);
-
-        let referer = if self.configuration.tld && self.configuration.subdomains {
-            2
-        } else if self.configuration.tld {
-            2
-        } else if self.configuration.subdomains {
-            1
-        } else {
-            0
-        };
-
-        if referer > 0 {
-            // use expected http headers for providers that drop invalid headers
-            headers.insert(reqwest::header::REFERER, HeaderValue::from(referer));
-        }
-
-        match &self.configuration.headers {
-            Some(h) => headers.extend(*h.to_owned()),
-            _ => (),
-        };
-
-        match self.get_absolute_path(None) {
-            Some(domain_url) => {
-                let domain_url = domain_url.as_str();
-                let domain_host = if domain_url.ends_with("/") {
-                    &domain_url[0..domain_url.len() - 1]
-                } else {
-                    domain_url
-                };
-                match HeaderValue::from_str(domain_host) {
-                    Ok(value) => {
-                        headers.insert(reqwest::header::HOST, value);
-                    }
-                    _ => (),
-                }
-            }
-            _ => (),
-        }
-
-        for worker in WORKERS.iter() {
-            match reqwest::Proxy::all(worker) {
-                Ok(worker) => {
-                    client = client.proxy(worker);
-                }
-                _ => (),
-            }
-        }
-
-        let client = ClientBuilder::new(unsafe {
-            match &self.configuration.request_timeout {
-                Some(t) => client.timeout(**t),
-                _ => client,
-            }
-            .default_headers(headers)
-            .build()
-            .unwrap_unchecked()
-        })
-        .with(Cache(HttpCache {
-            mode: CacheMode::Default,
-            manager: CACACHE_MANAGER.clone(),
-            options: HttpCacheOptions::default(),
-        }));
-
+        client = self.configure_client_cache(client);
         client.build()
     }
 
@@ -1203,7 +1081,6 @@ impl Website {
     }
 
     /// Setup config for crawl.
-    #[cfg(feature = "control")]
     async fn setup(&mut self) -> (Client, Option<(Arc<AtomicI8>, tokio::task::JoinHandle<()>)>) {
         self.determine_limits();
 
@@ -1215,28 +1092,16 @@ impl Website {
             Some(client) => client,
             _ => self.configure_http_client(),
         };
+
+        #[cfg(not(feature = "control"))]
+        let handle = None;
+        #[cfg(feature = "control")]
+        let handle = Some(self.configure_handler());
 
         (
             self.configure_robots_parser(client).await,
-            Some(self.configure_handler()),
+            handle,
         )
-    }
-
-    /// Setup config for crawl.
-    #[cfg(not(feature = "control"))]
-    async fn setup(&mut self) -> (Client, Option<(Arc<AtomicI8>, tokio::task::JoinHandle<()>)>) {
-        self.determine_limits();
-
-        if self.status != CrawlStatus::Active {
-            self.clear();
-        }
-
-        let client = match self.client.take() {
-            Some(client) => client,
-            _ => self.configure_http_client(),
-        };
-
-        (self.configure_robots_parser(client).await, None)
     }
 
     /// Setup shared concurrent configs.
