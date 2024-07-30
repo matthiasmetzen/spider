@@ -1,12 +1,12 @@
 /// Utils to modify the HTTP header.
 pub mod header_utils;
 
-use crate::tokio_stream::StreamExt;
+use crate::{page::Page, tokio_stream::StreamExt};
 use crate::Client;
 #[cfg(feature = "cache_chrome_hybrid")]
 use http_cache_semantics::{RequestLike, ResponseLike};
 
-use log::{info, log_enabled, Level};
+use log::{error, info, log_enabled, Level};
 #[cfg(feature = "headers")]
 use reqwest::header::HeaderMap;
 use reqwest::{Error, Response, StatusCode};
@@ -14,9 +14,9 @@ use reqwest::{Error, Response, StatusCode};
 lazy_static! {
     /// Prevent fetching resources beyond the bytes limit.
     static ref MAX_SIZE_BYTES: usize = {
+        const DEFAULT_MAX_SIZE_BYTES: usize = 1_073_741_824; // 1GB in bytes
         match std::env::var("SPIDER_MAX_SIZE_BYTES") {
             Ok(b) => {
-                const DEFAULT_MAX_SIZE_BYTES: usize = 1_073_741_824; // 1GB in bytes
 
                 let b = b.parse::<usize>().unwrap_or(DEFAULT_MAX_SIZE_BYTES);
 
@@ -26,7 +26,7 @@ lazy_static! {
                     b.max(1_048_576) // min 1mb
                 }
             },
-            _ => 0
+            _ => DEFAULT_MAX_SIZE_BYTES
         }
     };
 }
@@ -1026,8 +1026,8 @@ impl<'a> PageRequest<'a> {
 
     /// Perform a network request to a resource using a configuration struct
     pub async fn fetch_raw(&self, client: &Client) -> PageResponse {
-    use crate::bytes::BufMut;
-    use bytes::BytesMut;
+        use crate::bytes::BufMut;
+        use bytes::BytesMut;
 
         let mut req = client.request(self.method.clone(), self.url);
         if let Some(body) = self.body {
@@ -1052,42 +1052,42 @@ impl<'a> PageRequest<'a> {
 
                 let final_url = self.url.ne(url).then(|| url.into());
                 
-            let status_code = res.status();
-            #[cfg(feature = "headers")]
-            let headers = res.headers().clone();
-            let mut stream = res.bytes_stream();
-            let mut data: BytesMut = BytesMut::new();
+                let status_code = res.status();
+                #[cfg(feature = "headers")]
+                let headers = res.headers().clone();
+                let mut stream = res.bytes_stream();
+                let mut data: BytesMut = BytesMut::new();
 
-            while let Some(item) = stream.next().await {
+                while let Some(item) = stream.next().await {
                     let Ok(text) = item else {continue};
                     if data.len() + text.len() > *MAX_SIZE_BYTES {
-                            break;
-                        }
-                        data.put(text)
-            }
+                        break;
+                    }
+                    data.put(text)
+                }
 
-            PageResponse {
-                #[cfg(feature = "headers")]
-                headers: Some(headers),
-                content: Some(data.into()),
+                PageResponse {
+                    #[cfg(feature = "headers")]
+                    headers: Some(headers),
+                    content: Some(data.into()),
                     final_url,
-                status_code,
-                ..Default::default()
+                    status_code,
+                    ..Default::default()
+                }
             }
-        }
-        Ok(res) => PageResponse {
-            #[cfg(feature = "headers")]
-            headers: Some(res.headers().clone()),
-            status_code: res.status(),
-            ..Default::default()
-        },
+            Ok(res) => PageResponse {
+                #[cfg(feature = "headers")]
+                headers: Some(res.headers().clone()),
+                status_code: res.status(),
+                ..Default::default()
+            },
             Err(e) => {
                 //log("- error parsing html text {}", target_url);
                 error!("- error parsing html text {}: {:#?}", self.url, e);
-            Default::default()
+                Default::default()
+            }
         }
     }
-}
 
     /// Fetch and build the [Page] from the response
     pub async fn get_page(self, client: &Client) -> Page {
