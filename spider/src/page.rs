@@ -8,7 +8,6 @@ use bytes::Bytes;
 use compact_str::CompactString;
 use hashbrown::HashSet;
 use reqwest::StatusCode;
-use smallvec::SmallVec;
 
 #[cfg(all(feature = "time", not(feature = "decentralized")))]
 use std::time::Duration;
@@ -209,100 +208,39 @@ pub fn parent_host_match(
 }
 
 /// html selector for valid web pages for domain.
-pub fn get_page_selectors(
-    url: &str,
-    subdomains: bool,
-    tld: bool,
-) -> Option<(CompactString, SmallVec<[CompactString; 2]>)> {
-    match Url::parse(url) {
-        Ok(host) => {
-            let host_name = CompactString::from(
-                match convert_abs_path(&host, Default::default()).host_str() {
-                    Some(host) => host.to_ascii_lowercase(),
-                    _ => Default::default(),
-                },
-            );
-            let scheme = host.scheme();
-
-            Some(if tld || subdomains {
-                let dname = domain_name(&host);
-                let scheme = host.scheme();
-
-                (
-                    dname.into(),
-                    smallvec::SmallVec::from([host_name, CompactString::from(scheme)]),
-                )
-            } else {
-                (
-                    CompactString::default(),
-                    smallvec::SmallVec::from([host_name, CompactString::from(scheme)]),
-                )
-            })
-        }
-        _ => None,
-    }
+#[derive(Clone, Debug, Default)]
+pub struct PageSelectors {
+    /// Selector for the domain name
+    pub domain_name: CompactString,
+    /// Selector for the host name
+    pub host_name: CompactString,
+    /// Selector for the current scheme
+    pub scheme: CompactString,
 }
 
-/// Instantiate a new page without scraping it (used for testing purposes).
-#[cfg(not(feature = "decentralized"))]
-pub fn build(url: &str, res: PageResponse) -> Page {
-    Page {
-        html: if res.content.is_some() {
-            res.content
-        } else {
-            None
-        },
-        #[cfg(feature = "headers")]
-        headers: res.headers,
-        base: match Url::parse(url) {
-            Ok(u) => Some(u),
-            _ => None,
-        },
-        url: url.into(),
-        #[cfg(feature = "time")]
-        duration: Instant::now(),
-        external_domains_caseless: Default::default(),
-        final_redirect_destination: res.final_url,
-        status_code: res.status_code,
-        error_status: match res.error_for_status {
-            Some(e) => match e {
-                Ok(_) => None,
-                Err(er) => Some(er.to_string()),
-            },
-            _ => None,
-        },
-        #[cfg(feature = "chrome")]
-        chrome_page: None,
-        #[cfg(feature = "chrome")]
-        screenshot_bytes: res.screenshot_bytes,
-        #[cfg(feature = "openai")]
-        openai_credits_used: res.openai_credits_used,
-        #[cfg(feature = "openai")]
-        extra_ai_data: res.extra_ai_data,
-    }
-}
+impl PageSelectors {
+    /// Initialize selectors for valid web pages for domain.
+    pub fn try_new(url: &str, subdomains: bool, tld: bool) -> Option<Self> {
+        let host = Url::parse(url).ok()?;
 
-/// Instantiate a new page without scraping it (used for testing purposes).
-#[cfg(feature = "decentralized")]
-pub fn build(_: &str, res: PageResponse) -> Page {
-    Page {
-        html: if res.content.is_some() {
-            res.content
+        let host_name: CompactString = host.host_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .into();
+
+        let scheme = host.scheme().into();
+
+        let domain_name: CompactString = if tld || subdomains {
+            domain_name(&host).into()
         } else {
-            None
-        },
-        #[cfg(feature = "headers")]
-        headers: res.headers,
-        final_redirect_destination: res.final_url,
-        status_code: res.status_code,
-        error_status: match res.error_for_status {
-            Some(e) => match e {
-                Ok(_) => None,
-                Err(er) => Some(er.to_string()),
-            },
-            _ => None,
-        },
-        ..Default::default()
+            Default::default()
+        };
+
+        Some(Self {
+            domain_name,
+            host_name,
+            scheme
+        })
     }
 }
 
@@ -766,7 +704,7 @@ impl Page {
         A: PartialEq + Eq + std::hash::Hash + From<String>,
     >(
         &self,
-        selectors: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
         xml: &str,
         map: &mut HashSet<A>,
     ) {
@@ -779,8 +717,8 @@ impl Page {
 
         let mut buf = Vec::new();
 
-        let parent_host = &selectors.1[0];
-        let parent_host_scheme = &selectors.1[1];
+        let parent_host = &selectors.host_name;
+        let parent_host_scheme = &selectors.scheme;
 
         let mut is_link_tag = false;
 
@@ -803,7 +741,7 @@ impl Page {
                                     self.push_link(
                                         &v,
                                         map,
-                                        &selectors.0,
+                                        &selectors.domain_name,
                                         parent_host,
                                         parent_host_scheme,
                                     );
@@ -837,7 +775,7 @@ impl Page {
     #[cfg(all(not(feature = "decentralized")))]
     pub async fn links_stream_base<A: PartialEq + Eq + std::hash::Hash + From<String>>(
         &self,
-        selectors: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
         html: &str,
     ) -> HashSet<A> {
         let mut map = HashSet::new();
@@ -849,8 +787,8 @@ impl Page {
             let html = Box::new(Html::parse_fragment(html));
             let mut stream = tokio_stream::iter(html.tree);
 
-            let parent_host = &selectors.1[0];
-            let parent_host_scheme = &selectors.1[1];
+            let parent_host = &selectors.host_name;
+            let parent_host_scheme = &selectors.scheme;
 
             while let Some(node) = stream.next().await {
                 if let Some(element) = node.as_element() {
@@ -862,7 +800,7 @@ impl Page {
                                 self.push_link(
                                     href,
                                     &mut map,
-                                    &selectors.0,
+                                    &selectors.domain_name,
                                     parent_host,
                                     parent_host_scheme,
                                 );
@@ -881,7 +819,7 @@ impl Page {
     #[cfg(all(not(feature = "decentralized"), not(feature = "full_resources"),))]
     pub async fn links_stream<A: PartialEq + Eq + std::hash::Hash + From<String>>(
         &self,
-        selectors: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
     ) -> HashSet<A> {
         self.links_stream_base(selectors, &self.get_html()).await
     }
@@ -897,7 +835,7 @@ impl Page {
         A: PartialEq + std::fmt::Debug + Eq + std::hash::Hash + From<String>,
     >(
         &self,
-        selectors: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
         browser: &std::sync::Arc<chromiumoxide::Browser>,
         configuration: &crate::configuration::Configuration,
     ) -> HashSet<A> {
@@ -1196,7 +1134,7 @@ impl Page {
     #[inline(always)]
     pub async fn links_stream_full_resource<A: PartialEq + Eq + std::hash::Hash + From<String>>(
         &self,
-        selectors: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
     ) -> HashSet<A> {
         let mut map = HashSet::new();
         let html = self.get_html();
@@ -1208,10 +1146,9 @@ impl Page {
             let html = Box::new(crate::packages::scraper::Html::parse_document(&html));
             let mut stream = tokio_stream::iter(html.tree);
 
-            let base_domain = &selectors.0;
-            let parent_frags = &selectors.1; // todo: allow mix match tpt
-            let parent_host = &parent_frags[0];
-            let parent_host_scheme = &parent_frags[1];
+            let base_domain = &selectors.domain_name;
+            let parent_host = &selectors.host_name;
+            let parent_host_scheme = &selectors.scheme;
 
             while let Some(node) = stream.next().await {
                 if let Some(element) = node.as_element() {
@@ -1273,7 +1210,7 @@ impl Page {
     #[cfg(all(not(feature = "decentralized"), feature = "full_resources"))]
     pub async fn links_stream<A: PartialEq + Eq + std::hash::Hash + From<String>>(
         &self,
-        selectors: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
     ) -> HashSet<A> {
         self.links_stream_full_resource(selectors).await
     }
@@ -1283,7 +1220,7 @@ impl Page {
     /// Find the links as a stream using string resource validation
     pub async fn links_stream<A: PartialEq + Eq + std::hash::Hash + From<String>>(
         &self,
-        _: &(&CompactString, &SmallVec<[CompactString; 2]>),
+        _: &PageSelectors,
     ) -> HashSet<A> {
         Default::default()
     }
@@ -1293,12 +1230,12 @@ impl Page {
     #[inline(always)]
     pub async fn links(
         &self,
-        selectors: &(CompactString, SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
     ) -> HashSet<CaseInsensitiveString> {
         match self.html.is_some() {
             false => Default::default(),
             true => {
-                self.links_stream::<CaseInsensitiveString>(&(&selectors.0, &selectors.1))
+                self.links_stream::<CaseInsensitiveString>(selectors)
                     .await
             }
         }
@@ -1308,15 +1245,12 @@ impl Page {
     #[inline(always)]
     pub async fn links_full(
         &self,
-        selectors: &(CompactString, SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
     ) -> HashSet<CaseInsensitiveString> {
         match self.html.is_some() {
             false => Default::default(),
             true => {
-                self.links_stream_full_resource::<CaseInsensitiveString>(&(
-                    &selectors.0,
-                    &selectors.1,
-                ))
+                self.links_stream_full_resource::<CaseInsensitiveString>(selectors)
                 .await
             }
         }
@@ -1327,7 +1261,7 @@ impl Page {
     #[inline(always)]
     pub async fn smart_links(
         &self,
-        selectors: &(CompactString, SmallVec<[CompactString; 2]>),
+        selectors: &PageSelectors,
         page: &std::sync::Arc<chromiumoxide::Browser>,
         configuration: &crate::configuration::Configuration,
     ) -> HashSet<CaseInsensitiveString> {
@@ -1441,8 +1375,7 @@ async fn parse_links() {
 
     let link_result = "https://choosealicense.com/";
     let page: Page = Page::new(link_result, &client).await;
-    let selector = get_page_selectors(link_result, false, false);
-
+    let selector = PageSelectors::try_new(link_result, false, false);
     let links = page.links(&selector.unwrap()).await;
 
     assert!(

@@ -1182,8 +1182,8 @@ impl Website {
     }
 
     /// Setup selectors for handling link targets.
-    fn setup_selectors(&self) -> Option<(CompactString, smallvec::SmallVec<[CompactString; 2]>)> {
-        get_page_selectors(
+    fn setup_selectors(&self) -> Option<PageSelectors> {
+        PageSelectors::try_new(
             self.url.inner(),
             self.configuration.subdomains,
             self.configuration.tld,
@@ -1262,35 +1262,30 @@ impl Website {
     async fn _crawl_establish(
         &mut self,
         client: &Client,
-        base: &mut (CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        base: &mut PageSelectors,
         _: bool,
         scrape: bool,
     ) -> HashSet<CaseInsensitiveString> {
-        if self
+        if !self
             .is_allowed_default(self.get_base_link())
             .eq(&ProcessLinkStatus::Allowed)
         {
+            return HashSet::new();
+        }
+
             let url = self.url.inner();
             let page = Page::new_page(url, client).await;
             log("fetch", &url);
 
             // allow initial page mutation
-            match page.final_redirect_destination.as_deref() {
-                Some(domain) => {
-                    self.domain_parsed = match url::Url::parse(domain) {
-                        Ok(u) => Some(Box::new(crate::page::convert_abs_path(&u, "/"))),
-                        _ => None,
-                    };
+        if let Some(domain) = page.final_redirect_destination.as_deref() {
+            self.domain_parsed = Url::parse(domain)
+                .ok().map(|url| Box::new(crate::page::convert_abs_path(&url, "/")));
                     self.url = Box::new(domain.into());
-                    match self.setup_selectors() {
-                        Some(s) => {
-                            base.0 = s.0;
-                            base.1 = s.1;
+
+            if let Some(s) = self.setup_selectors() {
+                s.clone_into(base);
                         }
-                        _ => (),
-                    }
-                }
-                _ => (),
             };
 
             let links = if !page.is_empty() {
@@ -1309,10 +1304,9 @@ impl Website {
             };
 
             if scrape {
-                match self.pages.as_mut() {
-                    Some(p) => p.push(page.clone()),
-                    _ => (),
-                };
+            if let Some(p) = self.pages.as_mut() {
+                p.push(page.clone());
+            }
             }
 
             if page.status_code == reqwest::StatusCode::FORBIDDEN && links.len() == 0 {
@@ -1322,25 +1316,7 @@ impl Website {
             channel_send_page(&self.channel, page, &self.channel_guard);
 
             links
-        } else {
-            HashSet::new()
-        }
-    }
 
-    /// Expand links for crawl.
-    #[cfg(all(
-        not(feature = "glob"),
-        not(feature = "decentralized"),
-        not(feature = "chrome")
-    ))]
-    async fn crawl_establish(
-        &mut self,
-        client: &Client,
-        base: &mut (CompactString, smallvec::SmallVec<[CompactString; 2]>),
-        selector: bool,
-        scrape: bool,
-    ) -> HashSet<CaseInsensitiveString> {
-        self._crawl_establish(client, base, selector, scrape).await
     }
 
     /// Expand links for crawl.
@@ -1348,7 +1324,7 @@ impl Website {
     async fn crawl_establish(
         &mut self,
         client: &Client,
-        base: &mut (CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        base: &mut PageSelectors,
         _: bool,
         chrome_page: &chromiumoxide::Page,
         scrape: bool,
@@ -1463,7 +1439,7 @@ impl Website {
     async fn crawl_establish_smart(
         &mut self,
         client: &Client,
-        base: &mut (CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        base: &mut PageSelectors,
         _: bool,
         browser: &Arc<chromiumoxide::Browser>,
         scrape: bool,
@@ -1539,7 +1515,7 @@ impl Website {
     async fn crawl_establish(
         &mut self,
         client: &Client,
-        _: &(CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        _: &PageSelectors,
         http_worker: bool,
         scrape: bool,
     ) -> HashSet<CaseInsensitiveString> {
@@ -1597,7 +1573,7 @@ impl Website {
     async fn crawl_establish(
         &mut self,
         client: &Client,
-        _: &(CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        _: &PageSelectors,
         http_worker: bool,
         scrape: bool,
     ) -> HashSet<CaseInsensitiveString> {
@@ -1657,7 +1633,7 @@ impl Website {
     async fn crawl_establish(
         &mut self,
         client: &Client,
-        base: &mut (CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        base: &mut PageSelectors,
         _: bool,
         page: &chromiumoxide::Page,
         scrape: bool,
@@ -1719,7 +1695,7 @@ impl Website {
     async fn crawl_establish(
         &mut self,
         client: &Client,
-        base: &mut (CompactString, smallvec::SmallVec<[CompactString; 2]>),
+        base: &mut PageSelectors,
         _: bool,
         scrape: bool,
     ) -> HashSet<CaseInsensitiveString> {
