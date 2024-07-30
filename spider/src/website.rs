@@ -1,8 +1,8 @@
 use crate::black_list::contains;
 use crate::configuration::{self, get_ua, Configuration, RedirectPolicy};
 use crate::packages::robotparser::parser::RobotFileParser;
-use crate::page::{build, get_page_selectors, Page};
-use crate::utils::log;
+use crate::page::{Page, PageSelectors};
+use crate::utils::{log, PageRequest};
 use crate::CaseInsensitiveString;
 use crate::Client;
 
@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicI8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{
-    runtime::Handle,
     sync::{broadcast, Semaphore},
     task,
     task::JoinSet,
@@ -306,6 +305,19 @@ pub enum CronType {
     /// Scrape collecting links, page data as bytes to store, and etc.
     Scrape,
 }
+
+/// determine crawl type
+#[derive(PartialEq, Eq)]
+pub(crate) enum CrawlType {
+    Crawl,
+    CrawlRaw,
+    #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
+    CrawlSmart,
+    Scrape,
+    ScrapeRaw,
+    SiteMap,
+}
+
 
 /// Represents a website to crawl and gather all links or page content.
 /// ```rust
@@ -1777,16 +1789,32 @@ impl Website {
         }
     }
 
-    /// Start to crawl website with async concurrency.
-    pub async fn crawl(&mut self) {
+    /// Utility function to dispatch
+    async fn run(&mut self, crawl_type: CrawlType) {
         self.start();
         let (client, handle) = self.setup().await;
         let (handle, join_handle) = match handle {
             Some(h) => (Some(h.0), Some(h.1)),
             _ => (None, None),
         };
-        self.crawl_concurrent(&client, &handle).await;
-        self.sitemap_crawl_chain(&client, &handle, false).await;
+
+        match crawl_type {
+            CrawlType::Crawl => self.crawl_concurrent(&client, &handle).await,
+            CrawlType::CrawlRaw => self.crawl_concurrent_raw(&client, &handle).await,
+            CrawlType::Scrape => self.scrape_concurrent(&client, &handle).await,
+            CrawlType::ScrapeRaw => self.scrape_concurrent_raw(&client, &handle, false).await,
+            CrawlType::SiteMap => self.sitemap_crawl(&client, &handle, false).await,
+            #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
+            CrawlType::CrawlSmart => self.crawl_concurrent_smart(&client, &handle).await,
+        }
+
+        match crawl_type {
+            CrawlType::SiteMap => (),
+            #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
+            CrawlType::CrawlSmart => (),
+            _ => self.sitemap_crawl_chain(&client, &handle, false).await,
+        }
+
         self.set_crawl_status();
         if let Some(h) = join_handle {
             h.abort()
@@ -1794,146 +1822,86 @@ impl Website {
         self.client.replace(client);
     }
 
+    /// Start to crawl website with async concurrency.
+    pub async fn crawl(&mut self) {
+        self.run(CrawlType::Crawl).await;
+    }
+
     /// Start to crawl website with async concurrency using the sitemap. This does not page forward into the request. This does nothing without the `sitemap` flag enabled.
     pub async fn crawl_sitemap(&mut self) {
-        self.start();
-        let (client, handle) = self.setup().await;
-        let (handle, join_handle) = match handle {
-            Some(h) => (Some(h.0), Some(h.1)),
-            _ => (None, None),
-        };
-        self.sitemap_crawl(&client, &handle, false).await;
-        self.set_crawl_status();
-        if let Some(h) = join_handle {
-            h.abort()
-        }
-        self.client.replace(client);
+        self.run(CrawlType::SiteMap).await;
     }
 
     #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
     /// Start to crawl website with async concurrency smart. Use HTTP first and JavaScript Rendering as needed. This has no effect without the `smart` flag enabled.
     pub async fn crawl_smart(&mut self) {
-        self.start();
-        let (client, handle) = self.setup().await;
-        let (handle, join_handle) = match handle {
-            Some(h) => (Some(h.0), Some(h.1)),
-            _ => (None, None),
-        };
-        self.crawl_concurrent_smart(&client, &handle).await;
-        self.set_crawl_status();
-        if let Some(h) = join_handle {
-            h.abort()
-        }
-        self.client.replace(client);
-    }
-
-    #[cfg(all(not(feature = "decentralized"), not(feature = "smart")))]
-    /// Start to crawl website with async concurrency smart. Use HTTP first and JavaScript Rendering as needed. This has no effect without the `smart` flag enabled.
-    pub async fn crawl_smart(&mut self) {
-        self.crawl().await
+        self.run(CrawlType::CrawlSmart).await;
     }
 
     /// Start to crawl website with async concurrency using the base raw functionality. Useful when using the `chrome` feature and defaulting to the basic implementation.
     pub async fn crawl_raw(&mut self) {
-        self.start();
-        let (client, handle) = self.setup().await;
-        let (handle, join_handle) = match handle {
-            Some(h) => (Some(h.0), Some(h.1)),
-            _ => (None, None),
-        };
-        self.crawl_concurrent_raw(&client, &handle).await;
-        self.sitemap_crawl_chain(&client, &handle, false).await;
-        self.set_crawl_status();
-        if let Some(h) = join_handle {
-            h.abort()
-        }
-        self.client.replace(client);
+        self.run(CrawlType::CrawlRaw).await;
     }
 
     /// Start to scrape/download website with async concurrency.
     pub async fn scrape(&mut self) {
-        self.start();
-        let (client, handle) = self.setup().await;
-        let (handle, join_handle) = match handle {
-            Some(h) => (Some(h.0), Some(h.1)),
-            _ => (None, None),
-        };
-        self.scrape_concurrent(&client, &handle).await;
-        self.sitemap_crawl_chain(&client, &handle, true).await;
-        self.set_crawl_status();
-        if let Some(h) = join_handle {
-            h.abort()
-        }
-        self.client.replace(client);
+        self.run(CrawlType::Scrape).await;
     }
 
     /// Start to crawl website with async concurrency using the base raw functionality. Useful when using the "chrome" feature and defaulting to the basic implementation.
     pub async fn scrape_raw(&mut self) {
-        self.start();
-        let (client, handle) = self.setup().await;
-        let (handle, join_handle) = match handle {
-            Some(h) => (Some(h.0), Some(h.1)),
-            _ => (None, None),
-        };
-        self.scrape_concurrent_raw(&client, &handle).await;
-        self.sitemap_crawl_chain(&client, &handle, true).await;
-        self.set_crawl_status();
-        if let Some(h) = join_handle {
-            h.abort()
-        }
-        self.client.replace(client);
+        self.run(CrawlType::ScrapeRaw).await;
     }
 
     /// Start to crawl website concurrently - used mainly for chrome instances to connect to default raw HTTP.
     async fn crawl_concurrent_raw(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
         self.start();
-        match self.setup_selectors() {
-            Some(mut selector) => {
-                if match self.configuration.budget {
-                    Some(ref b) => match b.get(&*WILD_CARD_PATH) {
-                        Some(b) => b.eq(&1),
-                        _ => false,
-                    },
-                    _ => false,
-                } {
+        let Some(mut selectors) = self.setup_selectors() else {
+            log("", INVALID_URL);
+            return;
+        };
+
+        let mut only_establish = false;
+        if let Some(ref b) = self.configuration.budget {
+            if let Some(b) = b.get(&*WILD_CARD_PATH) {
+                only_establish = b.eq(&1);
                     self.status = CrawlStatus::Active;
-                    self._crawl_establish(client, &mut selector, false, false)
-                        .await;
-                } else {
-                    let mut links: HashSet<CaseInsensitiveString> =
-                        self.drain_extra_links().collect();
+            }
+        }
+
+        let established = self._crawl_establish(client, &mut selectors, false, false).await;
+        if only_establish {
+            return;
+        }
+
+        let mut links: HashSet<CaseInsensitiveString> = self.drain_extra_links().collect();
+        links.extend(established);
+
                     let (mut interval, throttle) = self.setup_crawl();
-                    let semaphore = if self.configuration.shared_queue {
-                        SEM_SHARED.clone()
-                    } else {
-                        Arc::new(Semaphore::const_new(*DEFAULT_PERMITS))
+        let semaphore = match self.configuration.shared_queue {
+            true => SEM_SHARED.clone(),
+            _ => Arc::new(Semaphore::const_new(*DEFAULT_PERMITS)),
                     };
 
-                    links.extend(
-                        self._crawl_establish(client, &mut selector, false, false)
-                            .await,
-                    );
                     self.configuration.configure_allowlist();
                     let on_link_find_callback = self.on_link_find_callback;
                     let full_resources = self.configuration.full_resources;
-                    let mut q = match &self.channel_queue {
-                        Some(q) => Some(q.0.subscribe()),
-                        _ => None,
-                    };
+
+        let mut rx = self.channel_queue
+            .as_ref()
+            .map(|(tx, _)| tx.subscribe());
 
                     let shared = Arc::new((
                         client.to_owned(),
-                        selector,
+            selectors,
                         self.channel.clone(),
                         self.configuration.external_domains_caseless.clone(),
                         self.channel_guard.clone(),
                     ));
 
                     let mut set: JoinSet<HashSet<CaseInsensitiveString>> = JoinSet::new();
-                    let chandle = Handle::current();
 
                     while !links.is_empty() {
-                        loop {
                             let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
                                 links.drain().collect(),
                             )
@@ -1941,9 +1909,7 @@ impl Website {
 
                             tokio::pin!(stream);
 
-                            loop {
-                                match stream.next().await {
-                                    Some(link) => {
+            while let Some(link) = stream.next().await {
                                         if !self
                                             .handle_process(handle, &mut interval, set.shutdown())
                                             .await
@@ -1951,14 +1917,11 @@ impl Website {
                                             break;
                                         }
 
-                                        let allowed = self.is_allowed(&link);
-
-                                        if allowed.eq(&ProcessLinkStatus::BudgetExceeded) {
-                                            break;
-                                        }
-                                        if allowed.eq(&ProcessLinkStatus::Blocked) {
-                                            continue;
-                                        }
+                match self.is_allowed(&link) {
+                    ProcessLinkStatus::Blocked => continue,
+                    ProcessLinkStatus::BudgetExceeded => break,
+                    ProcessLinkStatus::Allowed => (),
+                };
 
                                         log("fetch", &link);
                                         self.links_visited.insert(link.clone());
@@ -1966,17 +1929,17 @@ impl Website {
                                         let shared = shared.clone();
                                         let semaphore = semaphore.clone();
 
-                                        set.spawn_on(
+                set.spawn(
                                             run_task(semaphore, move || async move {
-                                                let link_result = match on_link_find_callback {
+                        let (link, _) = match on_link_find_callback {
                                                     Some(cb) => cb(link, None),
                                                     _ => (link, None),
                                                 };
-                                                let mut page = Page::new_page(
-                                                    link_result.0.as_ref(),
-                                                    &shared.0,
-                                                )
-                                                .await;
+
+                        let page_request = PageRequest::get(link.as_ref());
+
+                        let mut page = page_request.get_page(&shared.0).await;
+
                                                 page.set_external(shared.3.to_owned());
 
                                                 let page_links = if full_resources {
@@ -1988,76 +1951,56 @@ impl Website {
                                                 channel_send_page(&shared.2, page, &shared.4);
 
                                                 page_links
-                                            }),
-                                            &chandle,
+                    })
                                         );
 
-                                        match q.as_mut() {
-                                            Some(q) => {
-                                                while let Ok(link) = q.try_recv() {
+                if let Some(rx) = rx.as_mut() {
+                    while let Ok(link) = rx.try_recv() {
                                                     let s = link.into();
-                                                    let allowed = self.is_allowed(&s);
+                        match self.is_allowed(&s) {
+                            ProcessLinkStatus::Blocked => continue,
+                            ProcessLinkStatus::BudgetExceeded => break,
+                            ProcessLinkStatus::Allowed => (),
+                        };
 
-                                                    if allowed
-                                                        .eq(&ProcessLinkStatus::BudgetExceeded)
-                                                    {
-                                                        break;
-                                                    }
-                                                    if allowed.eq(&ProcessLinkStatus::Blocked) {
-                                                        continue;
-                                                    }
-                                                    links.extend(
-                                                        &HashSet::from([s]) - &self.links_visited,
-                                                    );
+                        if !self.links_visited.contains(&s) {
+                            links.insert(s);
                                                 }
                                             }
-                                            _ => (),
-                                        }
-                                    }
-                                    _ => break,
                                 }
                             }
 
                             while let Some(res) = set.join_next().await {
-                                match res {
-                                    Ok(msg) => links.extend(&msg - &self.links_visited),
-                                    _ => (),
-                                };
-                            }
-
-                            if links.is_empty() {
-                                break;
+                if let Ok(msg) = res {
+                    links.extend(&msg - &self.links_visited);
                             }
                         }
-
-                        if self.channel.is_some() {
-                            self.subscription_guard().await;
-                        }
-                    }
-                }
-            }
-            _ => log("", INVALID_URL),
         }
+
+                            self.subscription_guard().await;
+
     }
 
     /// Start to scape website concurrently and store html - used mainly for chrome instances to connect to default raw HTTP.
-    async fn scrape_concurrent_raw(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
+    async fn scrape_concurrent_raw(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>, establish: bool) {
         self.start();
-        match self.setup_selectors() {
-            Some(selectors) => {
-                let mut q = match &self.channel_queue {
-                    Some(q) => Some(q.0.subscribe()),
-                    _ => None,
+        let Some(mut selectors) = self.setup_selectors() else {
+            log("", INVALID_URL);
+            return;
                 };
 
                 if self.status != CrawlStatus::Active || self.pages.is_none() {
-                    self.pages.replace(Box::<Vec<Page>>::default());
+            self.pages.replace(Default::default());
                 }
-                let mut links: HashSet<CaseInsensitiveString> = HashSet::from([*self.url.clone()]);
 
-                if !self.extra_links.is_empty() {
+        let established = match establish {
+            true => self._crawl_establish(client, &mut selectors, false, false).await,
+            _ => HashSet::from([*self.url.clone()]),
+        };
+
+        let mut links: HashSet<CaseInsensitiveString> = HashSet::from([*self.url.clone()]);
+        links.extend(established);
                     links.extend(self.drain_extra_links());
-                }
 
                 let (mut interval, throttle) = self.setup_crawl();
 
@@ -2066,6 +2009,10 @@ impl Website {
                     Page,
                     HashSet<CaseInsensitiveString>,
                 )> = JoinSet::new();
+
+        let mut rx = self.channel_queue
+            .as_ref()
+            .map(|(tx, _)| tx.subscribe());
 
                 let shared = Arc::new((
                     client.to_owned(),
@@ -2080,12 +2027,11 @@ impl Website {
                 let full_resources = self.configuration.full_resources;
 
                 while !links.is_empty() {
-                    // crawl while links exists
-                    loop {
                         let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
                             links.drain().collect(),
                         )
                         .throttle(*throttle);
+
                         tokio::pin!(stream);
 
                         while let Some(link) = stream.next().await {
@@ -2095,66 +2041,60 @@ impl Website {
                             {
                                 break;
                             }
-                            let allowed = self.is_allowed(&link);
+                
+                match self.is_allowed(&link) {
+                    ProcessLinkStatus::Blocked => continue,
+                    ProcessLinkStatus::BudgetExceeded => break,
+                    ProcessLinkStatus::Allowed => (),
+                            }
 
-                            if allowed.eq(&ProcessLinkStatus::BudgetExceeded) {
-                                break;
-                            }
-                            if allowed.eq(&ProcessLinkStatus::Blocked) {
-                                continue;
-                            }
-                            self.links_visited.insert(link.clone());
                             log("fetch", &link);
-                            match SEM.acquire().await {
-                                Ok(permit) => {
+                self.links_visited.insert(link.clone());
+
+                let permit = SEM.acquire().await
+                    .expect("SEM was closed unexpectedly. This should never happen!");
+
                                     let shared = shared.clone();
 
                                     set.spawn(async move {
-                                        let page_resource = crate::utils::fetch_page_html_raw(
-                                            link.as_ref(),
-                                            &shared.0,
-                                        )
-                                        .await;
-                                        let mut page = build(link.as_ref(), page_resource);
+                    let page_request = PageRequest::get(link.as_ref());
+
+
+                    let mut page = page_request.get_page(&shared.0).await;
 
                                         let (link, _) = match on_link_find_callback {
                                             Some(cb) => cb(link, Some(page.get_html())),
                                             _ => (link, None),
                                         };
 
-                                        channel_send_page(&shared.2, page.clone(), &shared.4);
-
-                                        page.set_external(shared.3.clone());
+                    page.set_external(shared.3.to_owned());
 
                                         let page_links = if full_resources {
                                             page.links_full(&shared.1).await
                                         } else {
                                             page.links(&shared.1).await
                                         };
+                    
+                    channel_send_page(&shared.2, page.clone(), &shared.4);
+                    
                                         drop(permit);
 
                                         (link, page, page_links)
                                     });
-                                }
-                                _ => (),
-                            }
 
-                            match q.as_mut() {
-                                Some(q) => {
-                                    while let Ok(link) = q.try_recv() {
+                if let Some(rx) = rx.as_mut() {
+                    while let Ok(link) = rx.try_recv() {
                                         let s = link.into();
-                                        let allowed = self.is_allowed(&s);
+                        match self.is_allowed(&s) {
+                            ProcessLinkStatus::Blocked => continue,
+                            ProcessLinkStatus::BudgetExceeded => break,
+                            ProcessLinkStatus::Allowed => (),
+                                        }
 
-                                        if allowed.eq(&ProcessLinkStatus::BudgetExceeded) {
-                                            break;
-                                        }
-                                        if allowed.eq(&ProcessLinkStatus::Blocked) {
-                                            continue;
-                                        }
-                                        links.extend(&HashSet::from([s]) - &self.links_visited);
+                        if !self.links_visited.contains(&s) {
+                            links.insert(s);
                                     }
                                 }
-                                _ => (),
                             }
                         }
 
@@ -2165,31 +2105,17 @@ impl Website {
                         }
 
                         while let Some(res) = set.join_next().await {
-                            match res {
-                                Ok(msg) => {
-                                    let page = msg.1;
-                                    links.extend(&msg.2 - &self.links_visited);
+                if let Ok((_link, page, page_links)) = res {
+                    links.extend(&page_links - &self.links_visited);
                                     task::yield_now().await;
-                                    match self.pages.as_mut() {
-                                        Some(p) => p.push(page),
-                                        _ => (),
-                                    };
+                    if let Some(p) = self.pages.as_mut() {
+                        p.push(page);
                                 }
-                                _ => (),
-                            };
-                        }
-
-                        if links.is_empty() {
-                            break;
-                        }
-                    }
-                    if self.channel.is_some() {
-                        self.subscription_guard().await;
-                    }
                 }
             }
-            _ => log("", INVALID_URL),
-        }
+                        }
+
+                        self.subscription_guard().await;
     }
 
     /// Start to crawl website concurrently.
@@ -3040,159 +2966,7 @@ impl Website {
     #[cfg(not(feature = "chrome"))]
     /// Start to scape website concurrently and store resources.
     async fn scrape_concurrent(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
-        self.start();
-        match self.setup_selectors() {
-            Some(mut selectors) => {
-                let mut q = match &self.channel_queue {
-                    Some(q) => Some(q.0.subscribe()),
-                    _ => None,
-                };
-
-                if self.status != CrawlStatus::Active || self.pages.is_none() {
-                    self.pages.replace(Box::<Vec<Page>>::default());
-                }
-
-                let mut links: HashSet<CaseInsensitiveString> = HashSet::new();
-
-                if !self.extra_links.is_empty() {
-                    links.extend(self.drain_extra_links());
-                }
-
-                let (mut interval, throttle) = self.setup_crawl();
-
-                links.extend(
-                    self.crawl_establish(client, &mut selectors, false, true)
-                        .await,
-                );
-
-                self.configuration.configure_allowlist();
-
-                let on_link_find_callback = self.on_link_find_callback;
-                let full_resources = self.configuration.full_resources;
-
-                let shared = Arc::new((
-                    client.to_owned(),
-                    selectors,
-                    self.channel.clone(),
-                    self.configuration.external_domains_caseless.clone(),
-                    self.channel_guard.clone(),
-                ));
-
-                let mut set: JoinSet<(
-                    CaseInsensitiveString,
-                    Page,
-                    HashSet<CaseInsensitiveString>,
-                )> = JoinSet::new();
-
-                while !links.is_empty() {
-                    loop {
-                        let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
-                            links.drain().collect(),
-                        )
-                        .throttle(*throttle);
-                        tokio::pin!(stream);
-
-                        while let Some(link) = stream.next().await {
-                            if !self
-                                .handle_process(handle, &mut interval, set.shutdown())
-                                .await
-                            {
-                                break;
-                            }
-                            let allowed = self.is_allowed(&link);
-
-                            if allowed.eq(&ProcessLinkStatus::BudgetExceeded) {
-                                break;
-                            }
-                            if allowed.eq(&ProcessLinkStatus::Blocked) {
-                                continue;
-                            }
-                            self.links_visited.insert(link.clone());
-                            log("fetch", &link);
-
-                            match SEM.acquire().await {
-                                Ok(permit) => {
-                                    let shared = shared.clone();
-
-                                    set.spawn(async move {
-                                        let page_resource =
-                                            crate::utils::fetch_page_html(link.as_ref(), &shared.0)
-                                                .await;
-                                        let mut page = build(link.as_ref(), page_resource);
-
-                                        let (link, _) = match on_link_find_callback {
-                                            Some(cb) => cb(link, Some(page.get_html())),
-                                            _ => (link, None),
-                                        };
-
-                                        channel_send_page(&shared.2, page.clone(), &shared.4);
-
-                                        page.set_external(shared.3.to_owned());
-
-                                        let page_links = if full_resources {
-                                            page.links_full(&shared.1).await
-                                        } else {
-                                            page.links(&shared.1).await
-                                        };
-                                        drop(permit);
-
-                                        (link, page, page_links)
-                                    });
-                                }
-                                _ => (),
-                            };
-
-                            match q.as_mut() {
-                                Some(q) => {
-                                    while let Ok(link) = q.try_recv() {
-                                        let s = link.into();
-                                        let allowed = self.is_allowed(&s);
-
-                                        if allowed.eq(&ProcessLinkStatus::BudgetExceeded) {
-                                            break;
-                                        }
-                                        if allowed.eq(&ProcessLinkStatus::Blocked) {
-                                            continue;
-                                        }
-                                        links.extend(&HashSet::from([s]) - &self.links_visited);
-                                    }
-                                }
-                                _ => (),
-                            }
-                        }
-
-                        task::yield_now().await;
-
-                        if links.capacity() >= 1500 {
-                            links.shrink_to_fit();
-                        }
-
-                        while let Some(res) = set.join_next().await {
-                            match res {
-                                Ok(msg) => {
-                                    links.extend(&msg.2 - &self.links_visited);
-                                    task::yield_now().await;
-                                    match self.pages.as_mut() {
-                                        Some(p) => p.push(msg.1),
-                                        _ => (),
-                                    };
-                                }
-                                _ => (),
-                            };
-                        }
-
-                        if links.is_empty() {
-                            break;
-                        }
-                    }
-
-                    if self.channel.is_some() {
-                        self.subscription_guard().await;
-                    }
-                }
-            }
-            _ => log("", INVALID_URL),
-        }
+        self.scrape_concurrent_raw(client, handle, true).await;
     }
 
     #[cfg(all(feature = "chrome", not(feature = "chrome_intercept")))]

@@ -989,20 +989,69 @@ pub fn get_last_redirect(
     }
 }
 
-/// Perform a network request to a resource extracting all content streaming.
-pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageResponse {
+/// Configuration struct for a resource network request
+#[derive(Default, Debug)]
+pub struct PageRequest<'a> {
+    /// The target url for this request
+    pub url: &'a str,
+    /// The http method for this request
+    pub method: reqwest::Method,
+    /// The body to send with this request
+    pub body: Option<&'a bytes::Bytes>,
+    #[cfg(feature = "headers")]
+    /// Additional headers to add to this request
+    pub headers: Option<HeaderMap>,
+    /// The expected response status
+    pub expected_status: Option<reqwest::StatusCode>,
+}
+
+impl<'a> PageRequest<'a> {
+    /// Initialize a new [PageRequest] for a given url
+    pub fn get(target_url: &'a str) -> Self {
+        Self { 
+            url: target_url,
+            method: reqwest::Method::GET,
+            ..Default::default() 
+        }
+    }
+
+    /// Initialize a new [PageRequest] for a given url and [reqwest::Method]
+    pub fn new(target_url: &'a str, method: reqwest::Method) -> Self {
+        Self {
+            url: target_url,
+            method,
+            ..Default::default()
+        }
+    }
+
+    /// Perform a network request to a resource using a configuration struct
+    pub async fn fetch_raw(&self, client: &Client) -> PageResponse {
     use crate::bytes::BufMut;
     use bytes::BytesMut;
 
-    match client.get(target_url).send().await {
-        Ok(res) if res.status().is_success() => {
-            let u = res.url().as_str();
+        let mut req = client.request(self.method.clone(), self.url);
+        if let Some(body) = self.body {
+            req = req.body(body.to_owned());
+        }
 
-            let rd = if target_url != u {
-                Some(u.into())
-            } else {
-                None
-            };
+        #[cfg(feature = "headers")]
+        if let Some(headers) = &self.headers {
+            req = req.headers(headers.clone());
+        }
+
+        fn is_expected(status: StatusCode, expected: Option<StatusCode>) -> bool {
+            match expected {
+                Some(exp) => exp == status,
+                None => status.is_success()
+            }
+        }
+
+        match req.send().await {
+            Ok(res) if is_expected(res.status(), self.expected_status) => {
+                let url = res.url().as_str();
+
+                let final_url = self.url.ne(url).then(|| url.into());
+                
             let status_code = res.status();
             #[cfg(feature = "headers")]
             let headers = res.headers().clone();
@@ -1010,25 +1059,18 @@ pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageRespo
             let mut data: BytesMut = BytesMut::new();
 
             while let Some(item) = stream.next().await {
-                match item {
-                    Ok(text) => {
-                        let limit = *MAX_SIZE_BYTES;
-
-                        if limit > 0 && data.len() + text.len() > limit {
+                    let Ok(text) = item else {continue};
+                    if data.len() + text.len() > *MAX_SIZE_BYTES {
                             break;
                         }
-
                         data.put(text)
-                    }
-                    _ => (),
-                }
             }
 
             PageResponse {
                 #[cfg(feature = "headers")]
                 headers: Some(headers),
                 content: Some(data.into()),
-                final_url: rd,
+                    final_url,
                 status_code,
                 ..Default::default()
             }
@@ -1039,17 +1081,26 @@ pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageRespo
             status_code: res.status(),
             ..Default::default()
         },
-        Err(_) => {
-            log("- error parsing html text {}", target_url);
+            Err(e) => {
+                //log("- error parsing html text {}", target_url);
+                error!("- error parsing html text {}: {:#?}", self.url, e);
             Default::default()
         }
     }
 }
 
-#[cfg(all(not(feature = "fs"), not(feature = "chrome")))]
-/// Perform a network request to a resource extracting all content as text streaming.
-pub async fn fetch_page_html(target_url: &str, client: &Client) -> PageResponse {
-    fetch_page_html_raw(target_url, client).await
+    /// Fetch and build the [Page] from the response
+    pub async fn get_page(self, client: &Client) -> Page {
+        let res = self.fetch_raw(client).await;
+        Page::build(&self.url, res)
+    }
+}
+
+#[deprecated]
+/// Perform a network request to a resource extracting all content streaming.
+pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageResponse {
+    let req = PageRequest::get(target_url);
+    req.fetch_raw(client).await
 }
 
 /// Perform a network request to a resource extracting all content as text.
@@ -1103,6 +1154,13 @@ pub async fn fetch_page_and_headers(target_url: &str, client: &Client) -> FetchP
             FetchPageResult::FetchError
         }
     }
+}
+
+#[cfg(all(not(feature = "fs"), not(feature = "chrome")))]
+/// Perform a network request to a resource extracting all content as text streaming.
+pub async fn fetch_page_html(target_url: &str, client: &Client) -> PageResponse {
+    let req = PageRequest::get(target_url);
+    req.fetch_raw(client).await
 }
 
 /// Perform a network request to a resource extracting all content as text streaming.

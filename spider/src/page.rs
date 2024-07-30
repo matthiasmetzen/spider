@@ -1,6 +1,7 @@
 #[cfg(not(feature = "decentralized"))]
 use crate::packages::scraper::Html;
 use crate::utils::log;
+use crate::utils::PageRequest;
 use crate::utils::PageResponse;
 use crate::CaseInsensitiveString;
 use crate::Client;
@@ -247,15 +248,17 @@ impl PageSelectors {
 impl Page {
     /// Instantiate a new page and gather the html repro of standard fetch_page_html.
     pub async fn new_page(url: &str, client: &Client) -> Self {
-        let page_resource = crate::utils::fetch_page_html_raw(url, client).await;
-        build(url, page_resource)
+        let page_resource = PageRequest::get(url)
+            .fetch_raw(client)
+            .await;
+        Self::build(url, page_resource)
     }
 
     /// Instantiate a new page and gather the html.
     #[cfg(all(not(feature = "decentralized"), not(feature = "chrome")))]
     pub async fn new(url: &str, client: &Client) -> Self {
         let page_resource = crate::utils::fetch_page_html(url, client).await;
-        build(url, page_resource)
+        Self::build(url, page_resource)
     }
 
     #[cfg(all(not(feature = "decentralized"), feature = "chrome"))]
@@ -349,6 +352,69 @@ impl Page {
                 ..Default::default()
             },
             FetchPageResult::FetchError => Default::default(),
+        }
+    }
+
+    /// Instantiate a new page without scraping it (used for testing purposes).
+    #[cfg(not(feature = "decentralized"))]
+    pub fn build(url: &str, res: PageResponse) -> Self {
+        Page {
+            html: if res.content.is_some() {
+                res.content
+            } else {
+                None
+            },
+            #[cfg(feature = "headers")]
+            headers: res.headers,
+            base: match Url::parse(url) {
+                Ok(u) => Some(u),
+                _ => None,
+            },
+            url: url.into(),
+            #[cfg(feature = "time")]
+            duration: Instant::now(),
+            external_domains_caseless: Default::default(),
+            final_redirect_destination: res.final_url,
+            status_code: res.status_code,
+            error_status: match res.error_for_status {
+                Some(e) => match e {
+                    Ok(_) => None,
+                    Err(er) => Some(er.to_string()),
+                },
+                _ => None,
+            },
+            #[cfg(feature = "chrome")]
+            chrome_page: None,
+            #[cfg(feature = "chrome")]
+            screenshot_bytes: res.screenshot_bytes,
+            #[cfg(feature = "openai")]
+            openai_credits_used: res.openai_credits_used,
+            #[cfg(feature = "openai")]
+            extra_ai_data: res.extra_ai_data,
+        }
+    }
+
+    /// Instantiate a new page without scraping it (used for testing purposes).
+    #[cfg(feature = "decentralized")]
+    pub fn build(_: &str, res: PageResponse) -> Self {
+        Page {
+            html: if res.content.is_some() {
+                res.content
+            } else {
+                None
+            },
+            #[cfg(feature = "headers")]
+            headers: res.headers,
+            final_redirect_destination: res.final_url,
+            status_code: res.status_code,
+            error_status: match res.error_for_status {
+                Some(e) => match e {
+                    Ok(_) => None,
+                    Err(er) => Some(er.to_string()),
+                },
+                _ => None,
+            },
+            ..Default::default()
         }
     }
 
