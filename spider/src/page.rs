@@ -729,12 +729,7 @@ impl Page {
 
                 if !can_process && host_name.is_some() && !self.external_domains_caseless.is_empty()
                 {
-                    can_process = self
-                        .external_domains_caseless
-                        .contains::<CaseInsensitiveString>(&host_name.unwrap_or_default().into())
-                        || self
-                            .external_domains_caseless
-                            .contains::<CaseInsensitiveString>(&CASELESS_WILD_CARD);
+                    can_process = self.is_allowed_external_domain(&host_name.unwrap_or_default().into());
                     external_domain = can_process;
                 }
 
@@ -1243,16 +1238,8 @@ impl Page {
                                     && host_name.is_some()
                                     && !self.external_domains_caseless.is_empty()
                                 {
-                                    can_process = self
-                                        .external_domains_caseless
-                                        .contains::<CaseInsensitiveString>(
-                                        &host_name.unwrap_or_default().into(),
-                                    ) || self
-                                        .external_domains_caseless
-                                        .contains::<CaseInsensitiveString>(
-                                        &CASELESS_WILD_CARD,
-                                    );
-                                    external_domain = can_process;
+                                    external_domain = self.is_allowed_external_domain(&host_name.unwrap_or_default().into());
+                                    can_process = external_domain;
                                 }
 
                                 if can_process {
@@ -1385,6 +1372,19 @@ impl Page {
             Ok(u) => Some(convert_abs_path(&u, href)),
             _ => None,
         }
+    }
+
+    /// Check if this page is allowed to collect links pointing to a given host name
+    pub fn is_allowed_external_domain(&self, host_name: &CaseInsensitiveString) -> bool {
+        self
+            .external_domains_caseless
+            .contains::<CaseInsensitiveString>(
+            host_name
+        ) || self
+            .external_domains_caseless
+            .contains::<CaseInsensitiveString>(
+            &CASELESS_WILD_CARD
+        )
     }
 }
 
