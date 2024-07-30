@@ -165,17 +165,11 @@ lazy_static! {
 
 /// get the clean domain name
 pub fn domain_name(domain: &Url) -> &str {
-    match domain.host_str() {
-        Some(b) => {
-            let b = b.split('.').collect::<Vec<&str>>();
-            let bsize = b.len();
+    let Some(b) = domain.host_str() else {return ""};
 
-            if bsize > 0 {
-                b[bsize - 1]
-            } else {
-                ""
-            }
-        }
+    let last_sep = b.rfind('.');
+    match last_sep {
+        Some(pos) => &b[pos+1..],
         _ => "",
     }
 }
