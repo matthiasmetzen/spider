@@ -133,94 +133,94 @@ async fn setup_chrome_interception_base(
     if !chrome_intercept {
         return None;
     }
-        use chromiumoxide::cdp::browser_protocol::network::ResourceType;
+    use chromiumoxide::cdp::browser_protocol::network::ResourceType;
 
     if let Some(ref auth_challenge_response) = auth_challenge_response {
         if let Ok(mut rp) = page
-                        .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventAuthRequired>()
-                        .await
-                        {
-                                let intercept_page = page.clone();
-                                let auth_challenge_response = auth_challenge_response.clone();
-
-                                // we may need return for polling
-                                task::spawn(async move {
-                                    while let Some(event) = rp.next().await {
-                                        let u = &event.request.url;
-                                        let acr = chromiumoxide::cdp::browser_protocol::fetch::AuthChallengeResponse::from(auth_challenge_response.clone());
-
-                                        match chromiumoxide::cdp::browser_protocol::fetch::ContinueWithAuthParams::builder()
-                                        .request_id(event.request_id.clone())
-                                        .auth_challenge_response(acr)
-                                        .build() {
-                                            Ok(c) => {
-                                                if let Err(e) = intercept_page.execute(c).await
-                                                {
-                                                    log("Failed to fullfill auth challege request: ", e.to_string());
-                                                }
-                                            }
-                                            _ => {
-                                                log("Failed to get auth challege request handle ", &u);
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-        }
-
-        match page
-            .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventRequestPaused>()
+            .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventAuthRequired>()
             .await
         {
-            Ok(mut rp) => {
-                let mut host_name = host_name.to_string();
-                let intercept_page = page.clone();
+            let intercept_page = page.clone();
+            let auth_challenge_response = auth_challenge_response.clone();
 
-                let ih = task::spawn(async move {
-                    let mut first_rq = true;
-                    while let Some(event) = rp.next().await {
-                        let u = &event.request.url;
+            // we may need return for polling
+            task::spawn(async move {
+                while let Some(event) = rp.next().await {
+                    let u = &event.request.url;
+                    let acr = chromiumoxide::cdp::browser_protocol::fetch::AuthChallengeResponse::from(auth_challenge_response.clone());
 
-                        if first_rq {
-                            if ResourceType::Document == event.resource_type {
-                                host_name = u.into();
+                    match chromiumoxide::cdp::browser_protocol::fetch::ContinueWithAuthParams::builder()
+                    .request_id(event.request_id.clone())
+                    .auth_challenge_response(acr)
+                    .build() {
+                        Ok(c) => {
+                            if let Err(e) = intercept_page.execute(c).await
+                            {
+                                log("Failed to fullfill auth challege request: ", e.to_string());
                             }
-                            first_rq = false;
                         }
+                        _ => {
+                            log("Failed to get auth challege request handle ", &u);
+                        }
+                    }
+                }
+            });
+        }
+    }
 
-                        if
-                                    ignore_visuals && (ResourceType::Image == event.resource_type || ResourceType::Media == event.resource_type || ResourceType::Stylesheet == event.resource_type) ||
-                                    ResourceType::Prefetch == event.resource_type ||
-                                    ResourceType::Ping == event.resource_type ||
-                                    ResourceType::Script == event.resource_type && !(u.starts_with('/') || u.starts_with(&host_name) || crate::page::JS_FRAMEWORK_ALLOW.contains(&u.as_str()) || u.starts_with("https://js.stripe.com/v3/")) // add one off stripe framework check for now...
-                                {
-                                    match chromiumoxide::cdp::browser_protocol::fetch::FulfillRequestParams::builder()
-                                    .request_id(event.request_id.clone())
-                                    .response_code(200)
+    match page
+        .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventRequestPaused>()
+        .await
+    {
+        Ok(mut rp) => {
+            let mut host_name = host_name.to_string();
+            let intercept_page = page.clone();
+
+            let ih = task::spawn(async move {
+                let mut first_rq = true;
+                while let Some(event) = rp.next().await {
+                    let u = &event.request.url;
+
+                    if first_rq {
+                        if ResourceType::Document == event.resource_type {
+                            host_name = u.into();
+                        }
+                        first_rq = false;
+                    }
+
+                    if
+                        ignore_visuals && (ResourceType::Image == event.resource_type || ResourceType::Media == event.resource_type || ResourceType::Stylesheet == event.resource_type) ||
+                        ResourceType::Prefetch == event.resource_type ||
+                        ResourceType::Ping == event.resource_type ||
+                        ResourceType::Script == event.resource_type && !(u.starts_with('/') || u.starts_with(&host_name) || crate::page::JS_FRAMEWORK_ALLOW.contains(&u.as_str()) || u.starts_with("https://js.stripe.com/v3/")) // add one off stripe framework check for now...
+                    {
+                        match chromiumoxide::cdp::browser_protocol::fetch::FulfillRequestParams::builder()
+                            .request_id(event.request_id.clone())
+                            .response_code(200)
                             .build() 
                         {
-                                        Ok(c) => {
-                                            if let Err(e) = intercept_page.execute(c).await
-                                            {
-                                                log("Failed to fullfill request: ", e.to_string());
-                                            }
-                                        }
-                                        _ => {
-                                            log("Failed to get request handle ", &host_name);
-                                        }
-                                    }
-                            } else if let Err(e) = intercept_page
-                                .execute(chromiumoxide::cdp::browser_protocol::fetch::ContinueRequestParams::new(event.request_id.clone()))
-                                .await
+                            Ok(c) => {
+                                if let Err(e) = intercept_page.execute(c).await
                                 {
-                                    log("Failed to continue request: ", e.to_string());
+                                    log("Failed to fullfill request: ", e.to_string());
                                 }
+                            }
+                            _ => {
+                                log("Failed to get request handle ", &host_name);
+                            }
+                        }
+                    } else if let Err(e) = intercept_page
+                        .execute(chromiumoxide::cdp::browser_protocol::fetch::ContinueRequestParams::new(event.request_id.clone()))
+                        .await
+                    {
+                        log("Failed to continue request: ", e.to_string());
                     }
-                });
+                }
+            });
 
-                Some(ih)
-            }
-            _ => None,
+            Some(ih)
+        }
+        _ => None,
     }
 }
 
@@ -438,14 +438,14 @@ impl Website {
         }
 
         if let Some(handle) = handle.as_ref() {
-                    while handle.load(Ordering::Relaxed) == 1 {
-                        interval.tick().await;
-                    }
-                    if handle.load(Ordering::Relaxed) == 2 {
-                        (shutdown).await;
+            while handle.load(Ordering::Relaxed) == 1 {
+                interval.tick().await;
+            }
+            if handle.load(Ordering::Relaxed) == 2 {
+                (shutdown).await;
                 return false;
-                    }
-                }
+            }
+        }
 
         true
     }
@@ -555,7 +555,7 @@ impl Website {
             if segments.len() > self.configuration.depth_distance {
                 return true;
             }
-                                    }
+        }
 
         let Some(budget) = self.configuration.budget.as_mut() else { 
             return false 
@@ -577,12 +577,12 @@ impl Website {
             }
         };
         
-                                // check if paths pass
-                                            let mut joint_segment =
-                                                CaseInsensitiveString::default();
+        // check if paths pass
+        let mut joint_segment =
+            CaseInsensitiveString::default();
 
-                                            for seg in segments {
-                                                joint_segment.push_str(seg);
+        for seg in segments {
+            joint_segment.push_str(seg);
 
             if let Some(budget_entry) = budget.get_mut(&joint_segment) {
                 if *budget_entry == 0 {
@@ -595,7 +595,7 @@ impl Website {
             joint_segment.push('/');
         }
 
-            false
+        false
     }
 
     /// Amount of pages crawled.
@@ -699,29 +699,29 @@ impl Website {
             return client;
         }
 
-            let robot_file_parser = self
-                .robot_file_parser
-                .get_or_insert_with(RobotFileParser::new);
+        let robot_file_parser = self
+            .robot_file_parser
+            .get_or_insert_with(RobotFileParser::new);
 
         if robot_file_parser.mtime() > 4000 {
             return client;
         }
 
-                let host_str = match &self.domain_parsed {
-                    Some(domain) => domain.as_str(),
-                    _ => self.url.inner(),
-                };
-                if host_str.ends_with('/') {
-                    robot_file_parser.read(&client, host_str).await;
-                } else {
-                    robot_file_parser
-                        .read(&client, &string_concat!(host_str, "/"))
-                        .await;
-                }
+        let host_str = match &self.domain_parsed {
+            Some(domain) => domain.as_str(),
+            _ => self.url.inner(),
+        };
+        if host_str.ends_with('/') {
+            robot_file_parser.read(&client, host_str).await;
+        } else {
+            robot_file_parser
+                .read(&client, &string_concat!(host_str, "/"))
+                .await;
+        }
 
         if let Some(delay) = robot_file_parser.get_crawl_delay(&self.configuration.user_agent) {
-                        // 60 seconds should be the longest to respect for efficiency.
-                        self.configuration.delay = delay.as_millis().min(60000) as u64;
+            // 60 seconds should be the longest to respect for efficiency.
+            self.configuration.delay = delay.as_millis().min(60000) as u64;
         }
 
         client
@@ -739,45 +739,45 @@ impl Website {
             return default_policy;
         };
 
-                let initial_redirect = Arc::new(AtomicU8::new(0));
+        let initial_redirect = Arc::new(AtomicU8::new(0));
         let initial_redirect_limit = match self.configuration.respect_robots_txt {
             true => 2,
             _ => 1,
-                };
-                let subdomains = self.configuration.subdomains;
-                let tld = self.configuration.tld;
+        };
+        let subdomains = self.configuration.subdomains;
+        let tld = self.configuration.tld;
         let host_domain_name = match tld {
             true => domain_name(&host_s).to_string(),
             _ => Default::default(),
-                };
+        };
 
-                let redirect_limit = *self.configuration.redirect_limit;
+        let redirect_limit = *self.configuration.redirect_limit;
 
         let custom_policy = move |attempt: Attempt| {
-                        if tld && domain_name(attempt.url()) == host_domain_name
-                            || subdomains
-                                && attempt
-                                    .url()
-                                    .host_str()
-                                    .unwrap_or_default()
-                                    .ends_with(host_s.host_str().unwrap_or_default())
-                            || attempt.url().host() == host_s.host()
-                        {
-                            default_policy.redirect(attempt)
-                        } else if attempt.previous().len() > redirect_limit {
-                            attempt.error("too many redirects")
-                        } else if attempt.status().is_redirection()
-                            && (0..initial_redirect_limit)
-                                .contains(&initial_redirect.load(Ordering::Relaxed))
-                        {
-                            initial_redirect.fetch_add(1, Ordering::Relaxed);
-                            default_policy.redirect(attempt)
-                        } else {
-                            attempt.stop()
-                    }
-                };
+            if tld && domain_name(attempt.url()) == host_domain_name
+                || subdomains
+                    && attempt
+                        .url()
+                        .host_str()
+                        .unwrap_or_default()
+                        .ends_with(host_s.host_str().unwrap_or_default())
+                || attempt.url().host() == host_s.host()
+            {
+                default_policy.redirect(attempt)
+            } else if attempt.previous().len() > redirect_limit {
+                attempt.error("too many redirects")
+            } else if attempt.status().is_redirection()
+                && (0..initial_redirect_limit)
+                    .contains(&initial_redirect.load(Ordering::Relaxed))
+            {
+                initial_redirect.fetch_add(1, Ordering::Relaxed);
+                default_policy.redirect(attempt)
+            } else {
+                attempt.stop()
+            }
+        };
 
-                reqwest::redirect::Policy::custom(custom_policy)
+        reqwest::redirect::Policy::custom(custom_policy)
     }
 
     /// Setup redirect policy for reqwest.
@@ -844,18 +844,18 @@ impl Website {
         }
 
         if let Some(proxies) = &self.configuration.proxies {
-                for proxie in proxies.iter() {
+            for proxie in proxies.iter() {
                 if let Ok(proxy) = reqwest::Proxy::all(proxie) {
                     client = client.proxy(proxy);
-                    }
                 }
+            }
         }
 
         client = self.configure_http_client_cookies(client);
         client = self.configure_client_cache(client);
 
-                client
-            }
+        client
+    }
 
     /// Build the HTTP client with caching enabled.
     #[cfg(all(not(feature = "decentralized"), not(feature = "cache")))]
@@ -875,11 +875,11 @@ impl Website {
             return client;
         }
 
-            client.with(Cache(HttpCache {
-                mode: CacheMode::Default,
-                manager: CACACHE_MANAGER.clone(),
-                options: HttpCacheOptions::default(),
-            }))
+        client.with(Cache(HttpCache {
+            mode: CacheMode::Default,
+            manager: CACACHE_MANAGER.clone(),
+            options: HttpCacheOptions::default(),
+        }))
     }
 
     /// Build the HTTP client with cookie configurations.
@@ -1006,9 +1006,9 @@ impl Website {
         // should unwrap using native-tls-alpn
         let mut client = ClientBuilder::new(unsafe {
             client
-            .default_headers(headers)
-            .build()
-            .unwrap_unchecked()
+                .default_headers(headers)
+                .build()
+                .unwrap_unchecked()
         });
 
         client = self.configure_client_cache(client);
@@ -1150,49 +1150,54 @@ impl Website {
             return HashSet::new();
         }
 
-            let url = self.url.inner();
-            let page = Page::new_page(url, client).await;
-            log("fetch", &url);
+        let url = self.url.inner();
+        let page = Page::new_page(url, client).await;
+        log("fetch", &url);
 
-            // allow initial page mutation
+        // allow initial page mutation
         if let Some(domain) = page.final_redirect_destination.as_deref() {
             self.domain_parsed = Url::parse(domain)
                 .ok().map(|url| Box::new(crate::page::convert_abs_path(&url, "/")));
-                    self.url = Box::new(domain.into());
+            self.url = Box::new(domain.into());
 
             if let Some(s) = self.setup_selectors() {
                 s.clone_into(base);
-                        }
-            };
+            }
+        };
 
-            let links = if !page.is_empty() {
-                self.links_visited.insert(match self.on_link_find_callback {
-                    Some(cb) => {
-                        let c = cb(*self.url.clone(), None);
-                        c.0
-                    }
-                    _ => *self.url.clone(),
-                });
+        let links = if !page.is_empty() {
+            self.links_visited.insert(match self.on_link_find_callback {
+                Some(cb) => {
+                    let c = cb(*self.url.clone(), None);
+                    c.0
+                }
+                _ => *self.url.clone(),
+            });
 
-                page.links(base).await
-            } else {
-                self.status = CrawlStatus::Empty;
-                Default::default()
-            };
+            let full_resources = self.configuration.full_resources;
+            match (self.find_links_callback, full_resources) {
+                (Some(cb), _) => cb(&page, base, full_resources),
+                (_, true) => page.links_full(base).await,
+                (_, false) => page.links(base).await,
+            }
+        } else {
+            self.status = CrawlStatus::Empty;
+            Default::default()
+        };
 
-            if scrape {
+        if scrape {
             if let Some(p) = self.pages.as_mut() {
                 p.push(page.clone());
             }
-            }
+        }
 
-            if page.status_code == reqwest::StatusCode::FORBIDDEN && links.len() == 0 {
-                self.status = CrawlStatus::Blocked;
-            }
+        if page.status_code == reqwest::StatusCode::FORBIDDEN && links.len() == 0 {
+            self.status = CrawlStatus::Blocked;
+        }
 
-            channel_send_page(&self.channel, page, &self.channel_guard);
+        channel_send_page(&self.channel, page, &self.channel_guard);
 
-            links
+        links
 
     }
 
@@ -1730,7 +1735,7 @@ impl Website {
         if let Some(ref b) = self.configuration.budget {
             if let Some(b) = b.get(&*WILD_CARD_PATH) {
                 only_establish = b.eq(&1);
-                    self.status = CrawlStatus::Active;
+                self.status = CrawlStatus::Active;
             }
         }
 
@@ -1742,45 +1747,47 @@ impl Website {
         let mut links: HashSet<CaseInsensitiveString> = self.drain_extra_links().collect();
         links.extend(established);
 
-                    let (mut interval, throttle) = self.setup_crawl();
+        let (mut interval, throttle) = self.setup_crawl();
         let semaphore = match self.configuration.shared_queue {
             true => SEM_SHARED.clone(),
             _ => Arc::new(Semaphore::const_new(*DEFAULT_PERMITS)),
-                    };
-
-                    self.configuration.configure_allowlist();
-                    let on_link_find_callback = self.on_link_find_callback;
-                    let full_resources = self.configuration.full_resources;
+        };
+        
+        self.configuration.configure_allowlist();
+        let on_link_find_callback = self.on_link_find_callback;
+        let pre_request_callback = self.pre_request_callback;
+        let find_links_callback = self.find_links_callback;
+        let full_resources = self.configuration.full_resources;
 
         let mut rx = self.channel_queue
             .as_ref()
             .map(|(tx, _)| tx.subscribe());
 
-                    let shared = Arc::new((
-                        client.to_owned(),
+        let shared = Arc::new((
+            client.to_owned(),
             selectors,
-                        self.channel.clone(),
-                        self.configuration.external_domains_caseless.clone(),
-                        self.channel_guard.clone(),
-                    ));
+            self.channel.clone(),
+            self.configuration.external_domains_caseless.clone(),
+            self.channel_guard.clone(),
+        ));
 
-                    let mut set: JoinSet<HashSet<CaseInsensitiveString>> = JoinSet::new();
+        let mut set: JoinSet<HashSet<CaseInsensitiveString>> = JoinSet::new();
 
-                    while !links.is_empty() {
-                            let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
-                                links.drain().collect(),
-                            )
-                            .throttle(*throttle);
+        while !links.is_empty() {
+            let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
+                links.drain().collect(),
+            )
+            .throttle(*throttle);
 
-                            tokio::pin!(stream);
+            tokio::pin!(stream);
 
             while let Some(link) = stream.next().await {
-                                        if !self
-                                            .handle_process(handle, &mut interval, set.shutdown())
-                                            .await
-                                        {
-                                            break;
-                                        }
+                if !self
+                    .handle_process(handle, &mut interval, set.shutdown())
+                    .await
+                {
+                    break;
+                }
 
                 match self.is_allowed(&link) {
                     ProcessLinkStatus::Blocked => continue,
@@ -1788,40 +1795,45 @@ impl Website {
                     ProcessLinkStatus::Allowed => (),
                 };
 
-                                        log("fetch", &link);
-                                        self.links_visited.insert(link.clone());
+                log("fetch", &link);
+                self.links_visited.insert(link.clone());
 
-                                        let shared = shared.clone();
-                                        let semaphore = semaphore.clone();
+                let shared = shared.clone();
+                let semaphore = semaphore.clone();
 
                 set.spawn(
-                                            run_task(semaphore, move || async move {
+                    run_task(semaphore, move || async move {
                         let (link, _) = match on_link_find_callback {
-                                                    Some(cb) => cb(link, None),
-                                                    _ => (link, None),
-                                                };
+                            Some(cb) => cb(link, None),
+                            _ => (link, None),
+                        };
 
                         let page_request = PageRequest::get(link.as_ref());
 
+                        let page_request = match pre_request_callback {
+                            Some(cb) => cb(page_request),
+                            _ => page_request,
+                        };
+
                         let mut page = page_request.get_page(&shared.0).await;
 
-                                                page.set_external(shared.3.to_owned());
+                        page.set_external(shared.3.to_owned());
 
-                                                let page_links = if full_resources {
-                                                    page.links_full(&shared.1).await
-                                                } else {
-                                                    page.links(&shared.1).await
-                                                };
+                        let page_links = match (find_links_callback, full_resources) {
+                            (Some(cb), _) => cb(&page, &shared.1, full_resources),
+                            (_, true) => page.links_full(&shared.1).await,
+                            (_, false) => page.links(&shared.1).await,
+                        };
 
-                                                channel_send_page(&shared.2, page, &shared.4);
+                        channel_send_page(&shared.2, page, &shared.4);
 
-                                                page_links
+                        page_links
                     })
-                                        );
+                );
 
                 if let Some(rx) = rx.as_mut() {
                     while let Ok(link) = rx.try_recv() {
-                                                    let s = link.into();
+                        let s = link.into();
                         match self.is_allowed(&s) {
                             ProcessLinkStatus::Blocked => continue,
                             ProcessLinkStatus::BudgetExceeded => break,
@@ -1830,19 +1842,19 @@ impl Website {
 
                         if !self.links_visited.contains(&s) {
                             links.insert(s);
-                                                }
-                                            }
-                                }
-                            }
+                        }
+                    }
+                }
+            }
 
-                            while let Some(res) = set.join_next().await {
+            while let Some(res) = set.join_next().await {
                 if let Ok(msg) = res {
                     links.extend(&msg - &self.links_visited);
-                            }
-                        }
+                }
+            }
         }
 
-                            self.subscription_guard().await;
+        self.subscription_guard().await;
 
     }
 
@@ -1852,11 +1864,11 @@ impl Website {
         let Some(mut selectors) = self.setup_selectors() else {
             log("", INVALID_URL);
             return;
-                };
+        };
 
-                if self.status != CrawlStatus::Active || self.pages.is_none() {
+        if self.status != CrawlStatus::Active || self.pages.is_none() {
             self.pages.replace(Default::default());
-                }
+        }
 
         let established = match establish {
             true => self._crawl_establish(client, &mut selectors, false, false).await,
@@ -1865,122 +1877,128 @@ impl Website {
 
         let mut links: HashSet<CaseInsensitiveString> = HashSet::from([*self.url.clone()]);
         links.extend(established);
-                    links.extend(self.drain_extra_links());
+        links.extend(self.drain_extra_links());
 
-                let (mut interval, throttle) = self.setup_crawl();
+        let (mut interval, throttle) = self.setup_crawl();
 
-                let mut set: JoinSet<(
-                    CaseInsensitiveString,
-                    Page,
-                    HashSet<CaseInsensitiveString>,
-                )> = JoinSet::new();
+        let mut set: JoinSet<(
+            CaseInsensitiveString,
+            Page,
+            HashSet<CaseInsensitiveString>,
+        )> = JoinSet::new();
 
         let mut rx = self.channel_queue
             .as_ref()
             .map(|(tx, _)| tx.subscribe());
 
-                let shared = Arc::new((
-                    client.to_owned(),
-                    selectors,
-                    self.channel.clone(),
-                    self.configuration.external_domains_caseless.clone(),
-                    self.channel_guard.clone(),
-                ));
+        let shared = Arc::new((
+            client.to_owned(),
+            selectors,
+            self.channel.clone(),
+            self.configuration.external_domains_caseless.clone(),
+            self.channel_guard.clone(),
+        ));
 
-                self.configuration.configure_allowlist();
-                let on_link_find_callback = self.on_link_find_callback;
-                let full_resources = self.configuration.full_resources;
+        self.configuration.configure_allowlist();
+        let on_link_find_callback = self.on_link_find_callback;
+        let pre_request_callback = self.pre_request_callback;
+        let find_links_callback = self.find_links_callback;
+        let full_resources = self.configuration.full_resources;
 
-                while !links.is_empty() {
-                        let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
-                            links.drain().collect(),
-                        )
-                        .throttle(*throttle);
+        while !links.is_empty() {
+            let stream = tokio_stream::iter::<HashSet<CaseInsensitiveString>>(
+                links.drain().collect(),
+            )
+            .throttle(*throttle);
 
-                        tokio::pin!(stream);
+            tokio::pin!(stream);
 
-                        while let Some(link) = stream.next().await {
-                            if !self
-                                .handle_process(handle, &mut interval, set.shutdown())
-                                .await
-                            {
-                                break;
-                            }
+            while let Some(link) = stream.next().await {
+                if !self
+                    .handle_process(handle, &mut interval, set.shutdown())
+                    .await
+                {
+                    break;
+                }
                 
                 match self.is_allowed(&link) {
                     ProcessLinkStatus::Blocked => continue,
                     ProcessLinkStatus::BudgetExceeded => break,
                     ProcessLinkStatus::Allowed => (),
-                            }
+                }
 
-                            log("fetch", &link);
+                log("fetch", &link);
                 self.links_visited.insert(link.clone());
 
                 let permit = SEM.acquire().await
                     .expect("SEM was closed unexpectedly. This should never happen!");
 
-                                    let shared = shared.clone();
+                let shared = shared.clone();
 
-                                    set.spawn(async move {
+                set.spawn(async move {
                     let page_request = PageRequest::get(link.as_ref());
 
+                    let page_request = match pre_request_callback {
+                        Some(cb) => cb(page_request),
+                        _ => page_request,
+                    };
 
                     let mut page = page_request.get_page(&shared.0).await;
 
-                                        let (link, _) = match on_link_find_callback {
-                                            Some(cb) => cb(link, Some(page.get_html())),
-                                            _ => (link, None),
-                                        };
+                    let (link, _) = match on_link_find_callback {
+                        Some(cb) => cb(link, Some(page.get_html())),
+                        _ => (link, None),
+                    };
 
                     page.set_external(shared.3.to_owned());
-
-                                        let page_links = if full_resources {
-                                            page.links_full(&shared.1).await
-                                        } else {
-                                            page.links(&shared.1).await
-                                        };
+                    
+                    let page_links = match (find_links_callback, full_resources) {
+                        (Some(cb), _) => cb(&page, &shared.1, full_resources),
+                        (_, true) => page.links_full(&shared.1).await,
+                        (_, false) => page.links(&shared.1).await,
+                    };
                     
                     channel_send_page(&shared.2, page.clone(), &shared.4);
                     
-                                        drop(permit);
+                    drop(permit);
 
-                                        (link, page, page_links)
-                                    });
+                    (link, page, page_links)
+                });
 
                 if let Some(rx) = rx.as_mut() {
                     while let Ok(link) = rx.try_recv() {
-                                        let s = link.into();
+                        let s = link.into();
                         match self.is_allowed(&s) {
                             ProcessLinkStatus::Blocked => continue,
                             ProcessLinkStatus::BudgetExceeded => break,
                             ProcessLinkStatus::Allowed => (),
-                                        }
+                        }
 
                         if !self.links_visited.contains(&s) {
                             links.insert(s);
-                                    }
-                                }
-                            }
                         }
-
-                        task::yield_now().await;
-
-                        if links.capacity() >= 1500 {
-                            links.shrink_to_fit();
-                        }
-
-                        while let Some(res) = set.join_next().await {
-                if let Ok((_link, page, page_links)) = res {
-                    links.extend(&page_links - &self.links_visited);
-                                    task::yield_now().await;
-                    if let Some(p) = self.pages.as_mut() {
-                        p.push(page);
-                                }
+                    }
                 }
             }
-                        }
 
-                        self.subscription_guard().await;
+            task::yield_now().await;
+
+            if links.capacity() >= 1500 {
+                links.shrink_to_fit();
+            }
+
+            while let Some(res) = set.join_next().await {
+                if let Ok((_link, page, page_links)) = res {
+                    links.extend(&page_links - &self.links_visited);
+                    task::yield_now().await;
+                    if let Some(p) = self.pages.as_mut() {
+                        p.push(page);
+                    }
+                }
+            }
+        }
+
+        self.subscription_guard().await;
     }
 
     /// Start to crawl website concurrently.
@@ -4029,6 +4047,30 @@ impl Website {
             Some(callback) => self.on_link_find_callback = Some(callback),
             _ => self.on_link_find_callback = None,
         };
+        self
+    }
+
+    /// Adds a callback to perform custom logic to detect links. Overwrites the default logic.
+    pub fn with_find_links_callback(&mut self, 
+        find_links_callback: Option<fn(&Page, &PageSelectors, bool) 
+        -> HashSet<CaseInsensitiveString>>
+    ) -> &mut Self
+    {
+        self.find_links_callback = find_links_callback.into();
+        self
+    }
+
+    /// Adds a callback to determine whether a link should be crawled
+    pub fn with_is_allowed_callback(&mut self, is_allowed_callback: Option<fn(&CaseInsensitiveString) -> bool>) -> &mut Self
+    {
+        self.is_allowed_callback = is_allowed_callback.into();
+        self
+    }
+
+    /// Adds a callback that enables customization for crawling links
+    pub fn with_on_pre_request_callback(&mut self, pre_request_callback: Option<fn(PageRequest) -> PageRequest>) -> &mut Self  
+    {
+        self.pre_request_callback = pre_request_callback.into();
         self
     }
 
